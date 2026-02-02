@@ -20,6 +20,9 @@ from .tooling import ensure_tools, doctor_report, _find_system_python
 from .memory import init_db, index_repo, query_memory, vacuum_db
 from .loop import run_loop
 from .proxy import ProxyConfig, start_proxy_background, stop_proxy, proxy_status, proxy_is_listening
+from .prd import generate_prd, run_prd_qa, generate_prd_from_answers, save_prd_answers, load_prd_answers
+from .features import create_feature, list_features, get_current_feature, set_current_feature, get_feature_context
+from .agents import generate_agents_md, agents_md_exists
 
 app = typer.Typer(help="OpenRalph: orchestrate OpenCode with skills, gates, git, and memory.")
 config_app = typer.Typer(help="Manage openralph configuration.")
@@ -27,12 +30,18 @@ gitignore_app = typer.Typer(help="Manage repo .gitignore (openralph managed bloc
 opencode_app = typer.Typer(help="Manage the bundled OpenCode binary.")
 memory_app = typer.Typer(help="Memory index/query tools (SQLite + Ollama embeddings).")
 proxy_app = typer.Typer(help="Manage the OpenCode API proxy server.")
+prd_app = typer.Typer(help="Generate and manage Product Requirements Documents.")
+feature_app = typer.Typer(help="Manage feature specification folders.")
+agents_app = typer.Typer(help="Manage AGENTS.md and agent coordination.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(gitignore_app, name="gitignore")
 app.add_typer(opencode_app, name="opencode")
 app.add_typer(memory_app, name="memory")
 app.add_typer(proxy_app, name="proxy")
+app.add_typer(prd_app, name="prd")
+app.add_typer(feature_app, name="feature")
+app.add_typer(agents_app, name="agents")
 
 
 def _init_logging_for_repo(repo: Path, settings: OpenRalphSettings) -> None:
@@ -386,3 +395,175 @@ def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.A
     if log_file:
         print(f"[green]Log file[/green] {log_file}")
     print("[green]Done[/green]")
+
+
+# ========== PRD Commands ==========
+
+@prd_app.command("generate")
+def prd_generate_cmd(
+    repo: str = typer.Argument(".", help="Repo path"),
+    output: str | None = typer.Option(None, help="Output path (default: docs/PRD.md)"),
+    force: bool = typer.Option(False, help="Overwrite existing PRD"),
+):
+    """Generate a PRD from repository context using OpenCode."""
+    path = ensure_repo(repo)
+    s = OpenRalphSettings.load(path)
+    _init_logging_for_repo(path, s)
+
+    output_path = Path(output) if output else path / "docs" / "PRD.md"
+    if output_path.exists() and not force:
+        print(f"[yellow]PRD already exists[/yellow] {output_path}")
+        print("  Use --force to overwrite")
+        raise typer.Exit(code=1)
+
+    print("[cyan]Generating PRD...[/cyan] (this may take a moment)")
+    try:
+        result = generate_prd(path, output_path)
+        print(f"[green]Wrote[/green] {result}")
+    except Exception as e:
+        print(f"[red]Failed[/red]: {e}")
+        raise typer.Exit(code=1)
+
+
+@prd_app.command("qa")
+def prd_qa_cmd(
+    repo: str = typer.Argument(".", help="Repo path"),
+    output: str | None = typer.Option(None, help="Output path (default: docs/PRD.md)"),
+):
+    """Run interactive Q&A to generate a PRD."""
+    path = ensure_repo(repo)
+    output_path = Path(output) if output else path / "docs" / "PRD.md"
+
+    # Check for existing answers
+    existing = load_prd_answers(path)
+    if existing:
+        print("[cyan]Found existing PRD answers.[/cyan]")
+        use_existing = input("Use existing answers? (y/n) > ").strip().lower()
+        if use_existing == "y":
+            result = generate_prd_from_answers(path, existing, output_path)
+            print(f"[green]Wrote[/green] {result}")
+            return
+
+    answers = run_prd_qa(path)
+    save_prd_answers(path, answers)
+    print(f"[green]Saved answers[/green] .ralph/prd-answers.json")
+
+    result = generate_prd_from_answers(path, answers, output_path)
+    print(f"[green]Wrote[/green] {result}")
+
+
+@prd_app.command("show")
+def prd_show_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    """Show the current PRD."""
+    path = ensure_repo(repo)
+    prd_path = path / "docs" / "PRD.md"
+    if not prd_path.exists():
+        print("[yellow]No PRD found[/yellow]")
+        print("  Run: openralph prd generate .")
+        raise typer.Exit(code=1)
+    print(prd_path.read_text(encoding="utf-8"))
+
+
+# ========== Feature Commands ==========
+
+@feature_app.command("new")
+def feature_new_cmd(
+    repo: str = typer.Argument(".", help="Repo path"),
+    title: str = typer.Argument(..., help="Feature title"),
+    description: str = typer.Option("", help="Short description"),
+):
+    """Create a new feature folder with required files."""
+    path = ensure_repo(repo)
+    feature = create_feature(path, title, description)
+    print(f"[green]Created[/green] {feature.path}")
+    print(f"  00-brief.md")
+    print(f"  01-requirements.md")
+    print(f"  03-test-plan.md")
+    print(f"[green]Set current feature[/green] .ralph/CURRENT_FEATURE")
+
+
+@feature_app.command("list")
+def feature_list_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    """List all feature folders."""
+    path = ensure_repo(repo)
+    features = list_features(path)
+    if not features:
+        print("[yellow]No features found[/yellow]")
+        print("  Run: openralph feature new . \"Feature title\"")
+        return
+
+    for f in features:
+        marker = "[cyan]*[/cyan] " if f.is_current else "  "
+        print(f"{marker}{f.date_str} {f.title}")
+        print(f"    {f.path}")
+
+
+@feature_app.command("current")
+def feature_current_cmd(
+    repo: str = typer.Argument(".", help="Repo path"),
+    set_path: str | None = typer.Option(None, "--set", help="Set current feature by path"),
+):
+    """Show or set the current feature."""
+    path = ensure_repo(repo)
+
+    if set_path:
+        feature_path = path / set_path
+        if not feature_path.exists():
+            print(f"[red]Feature not found[/red]: {feature_path}")
+            raise typer.Exit(code=1)
+        set_current_feature(path, feature_path)
+        print(f"[green]Set current feature[/green] {set_path}")
+        return
+
+    current = get_current_feature(path)
+    if current:
+        print(f"[bold]Current feature:[/bold] {current.relative_to(path)}")
+        # Show brief if exists
+        brief = current / "00-brief.md"
+        if brief.exists():
+            print("")
+            print(brief.read_text(encoding="utf-8")[:500])
+    else:
+        print("[yellow]No current feature set[/yellow]")
+        print("  Run: openralph feature new . \"Feature title\"")
+
+
+@feature_app.command("context")
+def feature_context_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    """Show the current feature context (for prompts)."""
+    path = ensure_repo(repo)
+    context = get_feature_context(path)
+    if context:
+        print(context)
+    else:
+        print("[yellow]No current feature set[/yellow]")
+
+
+# ========== Agents Commands ==========
+
+@agents_app.command("init")
+def agents_init_cmd(
+    repo: str = typer.Argument(".", help="Repo path"),
+    force: bool = typer.Option(False, help="Overwrite existing AGENTS.md"),
+):
+    """Generate AGENTS.md in the repository root."""
+    path = ensure_repo(repo)
+    try:
+        result = generate_agents_md(path, force=force)
+        print(f"[green]Wrote[/green] {result}")
+    except FileExistsError as e:
+        print(f"[yellow]AGENTS.md already exists[/yellow]")
+        print("  Use --force to overwrite")
+        raise typer.Exit(code=1)
+
+
+@agents_app.command("show")
+def agents_show_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    """Show the current AGENTS.md."""
+    path = ensure_repo(repo)
+    agents_path = path / "AGENTS.md"
+    if not agents_path.exists():
+        print("[yellow]No AGENTS.md found[/yellow]")
+        print("  Run: openralph agents init .")
+        raise typer.Exit(code=1)
+    print(agents_path.read_text(encoding="utf-8"))

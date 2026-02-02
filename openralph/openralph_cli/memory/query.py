@@ -5,6 +5,7 @@ import math, sqlite3, struct
 from typing import List
 
 from .embed import ollama_embed
+from ..logging import get_logger
 
 @dataclass(frozen=True)
 class MemoryHit:
@@ -29,10 +30,17 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 def query_memory(db_path: Path, ollama_host: str, embed_model: str, query: str, k: int = 8) -> list[MemoryHit]:
+    log = get_logger("memory.query")
+    log.debug("query_memory: db=%s, k=%d, query=%s", db_path, k, query[:100])
+
+    log.debug("Embedding query via %s/%s", ollama_host, embed_model)
     qvec = ollama_embed(ollama_host, embed_model, query)
+    log.debug("Query embedded: %d dimensions", len(qvec))
+
     con = sqlite3.connect(db_path)
     rows = con.execute("SELECT path, chunk_index, content, embedding, dim FROM chunks").fetchall()
     con.close()
+    log.debug("Loaded %d chunks from database", len(rows))
 
     hits: list[MemoryHit] = []
     for path, chunk_index, content, blob, dim in rows:
@@ -41,4 +49,9 @@ def query_memory(db_path: Path, ollama_host: str, embed_model: str, query: str, 
         hits.append(MemoryHit(path, int(chunk_index), float(score), content))
 
     hits.sort(key=lambda h: h.score, reverse=True)
-    return hits[:k]
+    top_hits = hits[:k]
+    if top_hits:
+        log.debug("Top %d hits: scores range from %.3f to %.3f", len(top_hits), top_hits[0].score, top_hits[-1].score)
+    else:
+        log.debug("No hits found")
+    return top_hits

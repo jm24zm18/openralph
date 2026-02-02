@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Iterable, List, Tuple
 
 from .embed import ollama_embed
+from ..logging import get_logger
 
 DEFAULT_INCLUDE_EXTS = {
     ".md", ".mdx", ".markdown", ".txt",
@@ -93,9 +94,11 @@ def index_repo(
     chunk_chars: int = 1800,
     chunk_overlap: int = 200,
 ) -> None:
+    log = get_logger("memory.index")
     include_exts = include_exts or DEFAULT_INCLUDE_EXTS
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
 
+    log.debug("Starting index_repo: db=%s, host=%s, model=%s", db_path, ollama_host, embed_model)
     con = sqlite3.connect(db_path)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
@@ -103,14 +106,20 @@ def index_repo(
     root = repo.resolve()
     repo_name = root.name
     scan_id = datetime.now(timezone.utc).isoformat()
+    log.debug("Scan ID: %s, repo_name: %s", scan_id, repo_name)
+
+    files_processed = 0
+    chunks_embedded = 0
 
     for fp in iter_files(root, include_exts, exclude_dirs):
         rel = fp.relative_to(root).as_posix()
         try:
             text = fp.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to read file %s: %s", fp, e)
             continue
 
+        files_processed += 1
         doc_id = sha256(f"{repo_name}:{rel}")
         parts = chunk_text(text, max_chars=chunk_chars, overlap=chunk_overlap)
         chunks = [Chunk(doc_id, rel, idx, chunk, a, b) for idx, (a, b, chunk) in enumerate(parts)]
@@ -127,16 +136,30 @@ def index_repo(
             if not row or row[0] != sha256(c.content):
                 changed.append(c)
 
+        if changed:
+            log.debug("File %s: %d/%d chunks changed", rel, len(changed), len(chunks))
+
         for i in range(0, len(changed), batch):
             for c in changed[i:i + batch]:
-                emb = ollama_embed(ollama_host, embed_model, c.content)
-                upsert_chunk(con, c, emb, scan_id)
+                try:
+                    emb = ollama_embed(ollama_host, embed_model, c.content)
+                    upsert_chunk(con, c, emb, scan_id)
+                    chunks_embedded += 1
+                except Exception as e:
+                    log.warning("Failed to embed chunk %s#%d: %s", c.path, c.chunk_index, e)
+                    raise
             con.commit()
 
         con.execute("DELETE FROM chunks WHERE doc_id=? AND chunk_index>=?", (doc_id, len(chunks)))
         con.commit()
 
     # stale cleanup
+    result = con.execute("SELECT COUNT(*) FROM chunks WHERE last_seen_scan != ?", (scan_id,)).fetchone()
+    stale_count = result[0] if result else 0
+    if stale_count > 0:
+        log.debug("Removing %d stale chunks", stale_count)
     con.execute("DELETE FROM chunks WHERE last_seen_scan != ?", (scan_id,))
     con.commit()
     con.close()
+
+    log.info("Indexing complete: %d files processed, %d chunks embedded", files_processed, chunks_embedded)

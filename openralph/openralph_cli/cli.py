@@ -13,7 +13,7 @@ from .logging import init_logging, LogConfig, get_logger, get_log_file
 from .gitignore import GitignoreOptions, sync_gitignore, managed_block_is_current, render_managed_block
 from .policies import ensure_policies
 from .opencode_manager import ensure_opencode, install_opencode, find_opencode, opencode_version
-from .opencode_config import write_opencode_json, OpenCodeConfigOptions, ProxyProviderOptions
+from .opencode_config import write_opencode_json, OpenCodeConfigOptions, ProxyProviderOptions, AgentsOptions, AgentConfig
 from .skills_generator import write_default_skills
 from .tooling import ensure_tools, doctor_report
 from .memory import init_db, index_repo, query_memory, vacuum_db
@@ -260,7 +260,16 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
             model_display=s.proxy_model_display,
             api_key=s.proxy_api_key,
         )
-        ocfg = write_opencode_json(path, force=s.init_force_opencode_json, opts=OpenCodeConfigOptions(node_tooling=node_tooling, proxy=proxy_opts))
+        agents_opts = AgentsOptions(
+            enabled=s.agents_enabled,
+            default_provider=s.agents_default_provider,
+            default_model=s.agents_default_model,
+            code=AgentConfig(name="code", model=s.agent_code_model, permissions=tuple(s.agent_code_permissions)),
+            plan=AgentConfig(name="plan", model=s.agent_plan_model, permissions=tuple(s.agent_plan_permissions)),
+            test=AgentConfig(name="test", model=s.agent_test_model, permissions=tuple(s.agent_test_permissions)),
+            review=AgentConfig(name="review", model=s.agent_review_model, permissions=tuple(s.agent_review_permissions)),
+        )
+        ocfg = write_opencode_json(path, force=s.init_force_opencode_json, opts=OpenCodeConfigOptions(node_tooling=node_tooling, proxy=proxy_opts, agents=agents_opts))
         print(f"[green]Wrote[/green] {ocfg}")
 
     if s.init_write_skills:

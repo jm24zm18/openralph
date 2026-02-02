@@ -93,6 +93,21 @@ class OpenRalphSettings:
     proxy_api_key: str = "LOCAL_DGX"
     proxy_auto_start: bool = True
 
+    # Agents - all default to proxy provider/model
+    agents_enabled: bool = True
+    agents_default_provider: str = ""  # empty = use proxy provider
+    agents_default_model: str = ""  # empty = use proxy model
+    # Per-agent overrides (provider:model format, empty = use default)
+    agent_code_model: str = ""
+    agent_plan_model: str = ""
+    agent_test_model: str = ""
+    agent_review_model: str = ""
+    # Per-agent permissions
+    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "edit", "skill", "lsp", "question"])
+    agent_plan_permissions: list[str] = field(default_factory=lambda: ["skill", "question"])
+    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "skill", "lsp", "question"])
+    agent_review_permissions: list[str] = field(default_factory=lambda: ["skill", "question"])
+
     @staticmethod
     def load(repo: Path) -> "OpenRalphSettings":
         repo = repo.resolve()
@@ -157,6 +172,24 @@ class OpenRalphSettings:
         s.proxy_model_display = prx.get("model_display", s.proxy_model_display)
         s.proxy_api_key = prx.get("api_key", s.proxy_api_key)
         s.proxy_auto_start = prx.get("auto_start", s.proxy_auto_start)
+
+        agents = merged.get("agents", {})
+        s.agents_enabled = agents.get("enabled", s.agents_enabled)
+        s.agents_default_provider = agents.get("default_provider", s.agents_default_provider) or ""
+        s.agents_default_model = agents.get("default_model", s.agents_default_model) or ""
+        # Per-agent config
+        code_cfg = agents.get("code", {})
+        s.agent_code_model = code_cfg.get("model", s.agent_code_model) or ""
+        s.agent_code_permissions = code_cfg.get("permissions", s.agent_code_permissions)
+        plan_cfg = agents.get("plan", {})
+        s.agent_plan_model = plan_cfg.get("model", s.agent_plan_model) or ""
+        s.agent_plan_permissions = plan_cfg.get("permissions", s.agent_plan_permissions)
+        test_cfg = agents.get("test", {})
+        s.agent_test_model = test_cfg.get("model", s.agent_test_model) or ""
+        s.agent_test_permissions = test_cfg.get("permissions", s.agent_test_permissions)
+        review_cfg = agents.get("review", {})
+        s.agent_review_model = review_cfg.get("model", s.agent_review_model) or ""
+        s.agent_review_permissions = review_cfg.get("permissions", s.agent_review_permissions)
         return s
 
     def as_dict(self) -> dict:
@@ -204,6 +237,15 @@ class OpenRalphSettings:
                 "model_display": self.proxy_model_display,
                 "api_key": self.proxy_api_key,
                 "auto_start": self.proxy_auto_start,
+            },
+            "agents": {
+                "enabled": self.agents_enabled,
+                "default_provider": self.agents_default_provider,
+                "default_model": self.agents_default_model,
+                "code": {"model": self.agent_code_model, "permissions": self.agent_code_permissions},
+                "plan": {"model": self.agent_plan_model, "permissions": self.agent_plan_permissions},
+                "test": {"model": self.agent_test_model, "permissions": self.agent_test_permissions},
+                "review": {"model": self.agent_review_model, "permissions": self.agent_review_permissions},
             },
         }
 
@@ -256,4 +298,25 @@ model_id = "chatgpt-oss"                # Model ID in opencode.json
 model_display = "ChatGPT-OSS 120B"      # Model display name
 api_key = "LOCAL_DGX"                   # API key to use
 auto_start = true                       # Auto-start proxy on init/run
+
+[agents]
+enabled = true                          # Enable multi-agent support in opencode.json
+default_provider = ""                   # Default provider for all agents (empty = use proxy provider)
+default_model = ""                      # Default model for all agents (empty = use proxy model)
+
+[agents.code]
+model = ""                              # Model override for code agent (empty = use default)
+permissions = ["bash", "edit", "skill", "lsp", "question"]
+
+[agents.plan]
+model = ""                              # Model override for plan agent (empty = use default)
+permissions = ["skill", "question"]     # Plan agent: read-only, no edit/bash
+
+[agents.test]
+model = ""                              # Model override for test agent (empty = use default)
+permissions = ["bash", "skill", "lsp", "question"]  # Test agent: can run tests, no edit
+
+[agents.review]
+model = ""                              # Model override for review agent (empty = use default)
+permissions = ["skill", "question"]     # Review agent: read-only analysis
 """

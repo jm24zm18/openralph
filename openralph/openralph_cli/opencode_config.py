@@ -15,10 +15,30 @@ class ProxyProviderOptions:
     api_key: str = "LOCAL_DGX"
 
 @dataclass(frozen=True)
+class AgentConfig:
+    name: str
+    model: str = ""  # empty = use default
+    permissions: tuple[str, ...] = ("bash", "edit", "skill", "lsp", "question")
+
+@dataclass(frozen=True)
+class AgentsOptions:
+    enabled: bool = True
+    default_provider: str = ""  # empty = use proxy provider
+    default_model: str = ""  # empty = use proxy model
+    code: AgentConfig = field(default_factory=lambda: AgentConfig(name="code"))
+    plan: AgentConfig = field(default_factory=lambda: AgentConfig(
+        name="plan", permissions=("skill", "question")))
+    test: AgentConfig = field(default_factory=lambda: AgentConfig(
+        name="test", permissions=("bash", "skill", "lsp", "question")))
+    review: AgentConfig = field(default_factory=lambda: AgentConfig(
+        name="review", permissions=("skill", "question")))
+
+@dataclass(frozen=True)
 class OpenCodeConfigOptions:
     node_tooling: str = "global"  # global|local
     prefer_venvs: bool = True
     proxy: ProxyProviderOptions = field(default_factory=ProxyProviderOptions)
+    agents: AgentsOptions = field(default_factory=AgentsOptions)
 
 def _path_with_preference(opts: OpenCodeConfigOptions) -> str:
     parts = []
@@ -77,15 +97,36 @@ def build_opencode_json(opts: OpenCodeConfigOptions) -> dict:
                 },
             }
         }
-        config["agent"] = {
-            "build": {
-                "permission": {
-                    "lsp": "allow",
-                }
-            }
-        }
+
+    if opts.agents.enabled:
+        config["agent"] = _build_agents_block(opts)
 
     return config
+
+
+def _build_agents_block(opts: OpenCodeConfigOptions) -> dict:
+    default_provider = opts.agents.default_provider or (opts.proxy.provider_name if opts.proxy.enabled else "")
+    default_model = opts.agents.default_model or (opts.proxy.model_id if opts.proxy.enabled else "")
+
+    def build_agent(agent_cfg: AgentConfig) -> dict:
+        agent_model = agent_cfg.model or default_model
+        agent_block: dict = {
+            "permission": {perm: "allow" for perm in agent_cfg.permissions}
+        }
+        # Set model if we have one (provider:model format or just model)
+        if agent_model:
+            if default_provider and ":" not in agent_model:
+                agent_block["model"] = f"{default_provider}/{agent_model}"
+            else:
+                agent_block["model"] = agent_model
+        return agent_block
+
+    return {
+        "code": build_agent(opts.agents.code),
+        "plan": build_agent(opts.agents.plan),
+        "test": build_agent(opts.agents.test),
+        "review": build_agent(opts.agents.review),
+    }
 
 def write_opencode_json(repo: Path, *, force: bool, opts: OpenCodeConfigOptions) -> Path:
     repo = repo.resolve()

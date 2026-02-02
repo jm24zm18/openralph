@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 import typer
 from rich import print
@@ -15,7 +16,7 @@ from .policies import ensure_policies
 from .opencode_manager import ensure_opencode, install_opencode, find_opencode, opencode_version
 from .opencode_config import write_opencode_json, OpenCodeConfigOptions, ProxyProviderOptions, AgentsOptions, AgentConfig
 from .skills_generator import write_default_skills
-from .tooling import ensure_tools, doctor_report
+from .tooling import ensure_tools, doctor_report, _find_system_python
 from .memory import init_db, index_repo, query_memory, vacuum_db
 from .loop import run_loop
 from .proxy import ProxyConfig, start_proxy_background, stop_proxy, proxy_status, proxy_is_listening
@@ -288,7 +289,8 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
         else:
             venv_exists = (venv_dir / "bin" / "python").exists() or (path / "venv" / "bin" / "python").exists()
         if not venv_exists:
-            subprocess.run(["python", "-m", "venv", str(venv_dir)], cwd=str(path), check=True)
+            system_py = _find_system_python()
+            subprocess.run([system_py, "-m", "venv", str(venv_dir)], cwd=str(path), check=True)
             print("[green]Created[/green] .venv")
 
     if s.init_install_tools:

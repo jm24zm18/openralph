@@ -164,8 +164,13 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
     print("[green]Synced[/green] .gitignore (managed block)")
 
     if create_venv:
+        import os
         venv_dir = path / ".venv"
-        if not (venv_dir / "bin" / "python").exists() and not (path / "venv" / "bin" / "python").exists():
+        if os.name == "nt":
+            venv_exists = (venv_dir / "Scripts" / "python.exe").exists() or (path / "venv" / "Scripts" / "python.exe").exists()
+        else:
+            venv_exists = (venv_dir / "bin" / "python").exists() or (path / "venv" / "bin" / "python").exists()
+        if not venv_exists:
             subprocess.run(["python", "-m", "venv", str(venv_dir)], cwd=str(path), check=True)
             print("[green]Created[/green] .venv")
 

@@ -71,10 +71,8 @@ def sync_gitignore(repo: Path, opts: GitignoreOptions) -> Path:
         new_text = pre + block + post.lstrip("\n")
     else:
         new_text = existing
-        if new_text and not new_text.endswith("\n"):
-            new_text += "\n"
-        if new_text and not new_text.endswith("\n\n"):
-            new_text += "\n"
+        if new_text:
+            new_text = new_text.rstrip("\n") + "\n\n"
         new_text += block
 
     gi.write_text(new_text, encoding="utf-8")

@@ -44,6 +44,8 @@ def latest_checkpoint(repo: Path, prefix: str = "openralph: checkpoint") -> str 
     if p.returncode != 0:
         return None
     for line in p.stdout.splitlines():
+        if ":" not in line:
+            continue
         sha, subj = line.split(":", 1)
         if subj.strip().startswith(prefix):
             return sha.strip()

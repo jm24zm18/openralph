@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import os
 
 @dataclass(frozen=True)
 class OpenCodeConfigOptions:
@@ -11,11 +12,15 @@ class OpenCodeConfigOptions:
 def _path_with_preference(opts: OpenCodeConfigOptions) -> str:
     parts = []
     if opts.prefer_venvs:
-        parts += ["${workspaceFolder}/.venv/bin", "${workspaceFolder}/venv/bin"]
+        if os.name == "nt":
+            parts += ["${workspaceFolder}/.venv/Scripts", "${workspaceFolder}/venv/Scripts"]
+        else:
+            parts += ["${workspaceFolder}/.venv/bin", "${workspaceFolder}/venv/bin"]
     if opts.node_tooling == "local":
         parts += ["${workspaceFolder}/.ralph/node-tools/node_modules/.bin"]
     parts += ["${env:PATH}"]
-    return ":".join(parts)
+    sep = ";" if os.name == "nt" else ":"
+    return sep.join(parts)
 
 def build_opencode_json(opts: OpenCodeConfigOptions) -> dict:
     lsp_env = {"PATH": _path_with_preference(opts)}

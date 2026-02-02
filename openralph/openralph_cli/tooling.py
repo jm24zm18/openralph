@@ -68,14 +68,21 @@ def _ensure_node_tools_local(repo: Path, pkgs: list[str]) -> tuple[bool, str]:
 
 def _venv_python(repo: Path) -> Path | None:
     for d in (repo / ".venv", repo / "venv"):
-        py = d / "bin" / "python"
+        if os.name == "nt":
+            py = d / "Scripts" / "python.exe"
+        else:
+            py = d / "bin" / "python"
         if py.exists():
             return py
     return None
 
 def _venv_has_pylsp(repo: Path) -> bool:
     for d in (repo / ".venv", repo / "venv"):
-        if (d / "bin" / "pylsp").exists():
+        if os.name == "nt":
+            pylsp = d / "Scripts" / "pylsp.exe"
+        else:
+            pylsp = d / "bin" / "pylsp"
+        if pylsp.exists():
             return True
     return False
 

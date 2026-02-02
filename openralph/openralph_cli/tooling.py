@@ -3,6 +3,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,66 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
 def _have_bin(name: str) -> bool:
     return shutil.which(name) is not None
 
+def _find_system_python() -> str:
+    """Find a system Python interpreter for --user installs.
+
+    When running inside pipx/venv, sys.executable can't do --user installs.
+    Find python3 or python on the system PATH instead.
+    """
+    for name in ("python3", "python"):
+        py = shutil.which(name)
+        if py:
+            # Verify it's not inside a venv by checking for --user support
+            p = subprocess.run(
+                [py, "-c", "import site; print(site.ENABLE_USER_SITE)"],
+                capture_output=True, text=True
+            )
+            if p.returncode == 0 and p.stdout.strip() == "True":
+                return py
+    # Fallback to sys.executable if nothing better found
+    return sys.executable
+
+def _is_externally_managed_python(py: str) -> bool:
+    """Check if Python is externally managed (PEP 668)."""
+    p = subprocess.run(
+        [py, "-c", "import sysconfig; print(sysconfig.get_path('stdlib'))"],
+        capture_output=True, text=True
+    )
+    if p.returncode != 0:
+        return False
+    stdlib = Path(p.stdout.strip())
+    marker = stdlib / "EXTERNALLY-MANAGED"
+    return marker.exists()
+
+def _get_tools_venv(repo: Path) -> Path:
+    """Get the path to the tools venv in .ralph."""
+    return repo / ".ralph" / "tools-venv"
+
+def _get_tools_venv_python(repo: Path) -> str | None:
+    """Get the Python interpreter from the tools venv if it exists."""
+    venv = _get_tools_venv(repo)
+    if os.name == "nt":
+        py = venv / "Scripts" / "python.exe"
+    else:
+        py = venv / "bin" / "python"
+    if py.exists():
+        return str(py)
+    return None
+
+def _ensure_tools_venv(repo: Path) -> str:
+    """Create a tools venv if needed and return the Python path."""
+    venv_py = _get_tools_venv_python(repo)
+    if venv_py:
+        return venv_py
+
+    venv = _get_tools_venv(repo)
+    system_py = _find_system_python()
+    subprocess.run([system_py, "-m", "venv", str(venv)], check=True)
+
+    if os.name == "nt":
+        return str(venv / "Scripts" / "python.exe")
+    return str(venv / "bin" / "python")
+
 def _have_bin_in(name: str, extra_bin_dir: Path) -> bool:
     if not extra_bin_dir.exists():
         return False
@@ -32,8 +93,18 @@ def _have_bin_in(name: str, extra_bin_dir: Path) -> bool:
                 return True
     return False
 
-def _have_python_module(module: str) -> bool:
-    p = _run(["python", "-c", f"import {module}"])
+def _have_python_module(module: str, repo: Path | None = None) -> bool:
+    # Check in tools venv first if repo is provided
+    if repo:
+        tools_py = _get_tools_venv_python(repo)
+        if tools_py:
+            p = _run([tools_py, "-c", f"import {module}"])
+            if p.returncode == 0:
+                return True
+
+    # Check system python
+    system_py = _find_system_python()
+    p = _run([system_py, "-c", f"import {module}"])
     return p.returncode == 0
 
 def _ollama_ok(host: str) -> tuple[bool, str]:
@@ -78,7 +149,8 @@ def _venv_python(repo: Path) -> Path | None:
     return None
 
 def _venv_has_pylsp(repo: Path) -> bool:
-    for d in (repo / ".venv", repo / "venv"):
+    venv_dirs = [repo / ".venv", repo / "venv", _get_tools_venv(repo)]
+    for d in venv_dirs:
         if os.name == "nt":
             pylsp = d / "Scripts" / "pylsp.exe"
         else:
@@ -133,13 +205,23 @@ def ensure_tools(
             results.append(ToolStatus("pylsp", False, "missing", hint="python -m pip install --user python-lsp-server"))
         else:
             if venv_py is not None:
+                # Use repo venv
                 p = _run([str(venv_py), "-m", "pip", "install", "python-lsp-server"])
                 ok2 = (p.returncode == 0) and _venv_has_pylsp(repo)
                 results.append(ToolStatus("pylsp", ok2, p.stderr.strip() or p.stdout.strip(), hint="Installed into venv"))
             else:
-                p = _run(["python", "-m", "pip", "install", "--user", "python-lsp-server"])
-                ok2 = (p.returncode == 0) and _have_bin("pylsp")
-                results.append(ToolStatus("pylsp", ok2, p.stderr.strip() or p.stdout.strip()))
+                system_py = _find_system_python()
+                if _is_externally_managed_python(system_py):
+                    # Create tools venv and install there
+                    tools_py = _ensure_tools_venv(repo)
+                    p = _run([tools_py, "-m", "pip", "install", "python-lsp-server"])
+                    ok2 = (p.returncode == 0) and _venv_has_pylsp(repo)
+                    results.append(ToolStatus("pylsp", ok2, p.stderr.strip() or p.stdout.strip(), hint="Installed into .ralph/tools-venv"))
+                else:
+                    # Use --user install
+                    p = _run([system_py, "-m", "pip", "install", "--user", "python-lsp-server"])
+                    ok2 = (p.returncode == 0) and _have_bin("pylsp")
+                    results.append(ToolStatus("pylsp", ok2, p.stderr.strip() or p.stdout.strip()))
 
     node_pkgs = ["typescript", "typescript-language-server", "vscode-langservers-extracted"]
     have_tsls = _have_bin("typescript-language-server") or _have_bin_in("typescript-language-server", local_bin)
@@ -164,19 +246,33 @@ def ensure_tools(
             results.append(ToolStatus("node-language-servers", ok4, msg))
 
     if install_playwright:
-        have_pw = _have_python_module("playwright")
+        have_pw = _have_python_module("playwright", repo)
         if have_pw:
             results.append(ToolStatus("playwright-python", True, "python module found"))
         else:
             if install:
-                p = _run(["python", "-m", "pip", "install", "--user", "playwright", "pytest-playwright"])
-                ok5 = p.returncode == 0 and _have_python_module("playwright")
-                results.append(ToolStatus("playwright-python", ok5, p.stderr.strip() or p.stdout.strip()))
+                system_py = _find_system_python()
+                if _is_externally_managed_python(system_py):
+                    # Create/use tools venv
+                    tools_py = _ensure_tools_venv(repo)
+                    p = _run([tools_py, "-m", "pip", "install", "playwright", "pytest-playwright"])
+                    ok5 = p.returncode == 0 and _have_python_module("playwright", repo)
+                    results.append(ToolStatus("playwright-python", ok5, p.stderr.strip() or p.stdout.strip(), hint="Installed into .ralph/tools-venv"))
+                else:
+                    p = _run([system_py, "-m", "pip", "install", "--user", "playwright", "pytest-playwright"])
+                    ok5 = p.returncode == 0 and _have_python_module("playwright", repo)
+                    results.append(ToolStatus("playwright-python", ok5, p.stderr.strip() or p.stdout.strip()))
             else:
                 results.append(ToolStatus("playwright-python", False, "missing"))
 
         if install_playwright_browsers and install:
-            p = _run(["python", "-m", "playwright", "install", "chromium"])
+            # Use the python that has playwright installed
+            tools_py = _get_tools_venv_python(repo)
+            if tools_py:
+                p = _run([tools_py, "-m", "playwright", "install", "chromium"])
+            else:
+                system_py = _find_system_python()
+                p = _run([system_py, "-m", "playwright", "install", "chromium"])
             results.append(ToolStatus("playwright-browsers-chromium", p.returncode == 0, p.stderr.strip() or p.stdout.strip()))
     return results
 
@@ -212,8 +308,9 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
                                "ok" if (have_tsls and have_html and have_css) else "missing",
                                hint="Run openralph init --node-tooling local"))
 
-    statuses.append(ToolStatus("playwright-python", _have_python_module("playwright"),
-                               "found" if _have_python_module("playwright") else "missing"))
+    pw_found = _have_python_module("playwright", repo)
+    statuses.append(ToolStatus("playwright-python", pw_found,
+                               "found" if pw_found else "missing"))
 
     if proxy_enabled:
         pid_file = repo / ".ralph" / "proxy.pid"

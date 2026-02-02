@@ -75,6 +75,11 @@ class OpenRalphSettings:
         ".json", ".jsonc", ".yaml", ".yml", ".toml"
     ])
 
+    # Logging
+    log_level: str = "INFO"
+    log_console: bool = False  # Don't spam console by default, use Rich output
+    log_file: bool = True
+
     # Proxy
     proxy_enabled: bool = False
     proxy_listen_port: int = 18889
@@ -135,6 +140,11 @@ class OpenRalphSettings:
         s.memory_exclude_dirs = mem.get("exclude_dirs", s.memory_exclude_dirs)
         s.memory_include_exts = mem.get("include_exts", s.memory_include_exts)
 
+        log = merged.get("logging", {})
+        s.log_level = log.get("level", s.log_level)
+        s.log_console = log.get("console", s.log_console)
+        s.log_file = log.get("file", s.log_file)
+
         prx = merged.get("proxy", {})
         s.proxy_enabled = prx.get("enabled", s.proxy_enabled)
         s.proxy_listen_port = int(prx.get("listen_port", s.proxy_listen_port))
@@ -176,6 +186,11 @@ class OpenRalphSettings:
                 "vacuum_warn_mb": self.memory_vacuum_warn_mb,
                 "exclude_dirs": self.memory_exclude_dirs,
                 "include_exts": self.memory_include_exts,
+            },
+            "logging": {
+                "level": self.log_level,
+                "console": self.log_console,
+                "file": self.log_file,
             },
             "proxy": {
                 "enabled": self.proxy_enabled,
@@ -223,6 +238,11 @@ chunk_overlap = 200
 vacuum_warn_mb = 200
 exclude_dirs = [".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"]
 include_exts = [".md", ".mdx", ".markdown", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".scss", ".less", ".json", ".jsonc", ".yaml", ".yml", ".toml"]
+
+[logging]
+level = "INFO"                          # DEBUG, INFO, WARNING, ERROR, CRITICAL
+console = false                         # Log to stderr (in addition to Rich output)
+file = true                             # Log to .ralph/logs/openralph_*.log
 
 [proxy]
 enabled = false                         # Enable OpenCode proxy server

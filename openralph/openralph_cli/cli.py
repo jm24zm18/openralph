@@ -9,6 +9,7 @@ from rich import print
 from .repo import ensure_repo
 from .paths import Paths
 from .settings import OpenRalphSettings, global_config_path, repo_config_path, STARTER_TOML
+from .logging import init_logging, LogConfig, get_logger, get_log_file
 from .gitignore import GitignoreOptions, sync_gitignore, managed_block_is_current, render_managed_block
 from .policies import ensure_policies
 from .opencode_manager import ensure_opencode, install_opencode, find_opencode, opencode_version
@@ -31,6 +32,17 @@ app.add_typer(gitignore_app, name="gitignore")
 app.add_typer(opencode_app, name="opencode")
 app.add_typer(memory_app, name="memory")
 app.add_typer(proxy_app, name="proxy")
+
+
+def _init_logging_for_repo(repo: Path, settings: OpenRalphSettings) -> None:
+    paths = Paths.for_repo(repo)
+    config = LogConfig(
+        level=settings.log_level,
+        console=settings.log_console,
+        file=settings.log_file,
+        file_path=None,
+    )
+    init_logging(config, log_dir=paths.logs)
 
 @config_app.command("init")
 def config_init(
@@ -211,22 +223,30 @@ def proxy_config_cmd(repo: str = typer.Argument(".", help="Repo path")):
 @app.command()
 def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
          node_tooling: str | None = typer.Option(None, help="global|local"),
-         create_venv: bool | None = typer.Option(None, help="Create .venv if missing")):
+         create_venv: bool | None = typer.Option(None, help="Create .venv if missing"),
+         log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
+    if log_level:
+        s.log_level = log_level
     node_tooling = s.init_node_tooling if node_tooling is None else node_tooling
     create_venv = s.init_create_venv if create_venv is None else create_venv
 
     paths = Paths.for_repo(path)
     paths.ralph.mkdir(parents=True, exist_ok=True)
     paths.logs.mkdir(parents=True, exist_ok=True)
+    _init_logging_for_repo(path, s)
+    log = get_logger("cli")
+    log.info("Initializing repository: %s", path)
     ensure_policies(path)
     init_db(paths.memory_db)
 
     try:
         oc = ensure_opencode(path, auto_install=s.opencode_auto_install, version=s.opencode_version)
+        log.info("OpenCode found: %s (%s)", oc.path, oc.source)
         print(f"[green]OpenCode[/green] {oc.path} ({oc.source})")
     except Exception as e:
+        log.error("OpenCode install failed: %s", e, exc_info=True)
         print(f"[red]OpenCode install failed[/red]: {e}")
         print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
 
@@ -290,12 +310,22 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
             pid = start_proxy_background(config, paths.proxy_pid, paths.proxy_log)
             print(f"[green]Started[/green] proxy (PID {pid}) on port {s.proxy_listen_port}")
 
+    log.info("Repository initialized successfully: %s", path)
+    log_file = get_log_file()
+    if log_file:
+        print(f"[green]Log file[/green] {log_file}")
     print(f"[green]Initialized[/green] {path}")
 
 @app.command()
-def doctor(repo: str = typer.Argument(".", help="Repo path")):
+def doctor(repo: str = typer.Argument(".", help="Repo path"),
+           log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
+    if log_level:
+        s.log_level = log_level
+    _init_logging_for_repo(path, s)
+    log = get_logger("cli")
+    log.info("Running doctor check on: %s", path)
     all_ok = True
 
     oc = find_opencode(path)
@@ -328,9 +358,20 @@ def doctor(repo: str = typer.Argument(".", help="Repo path")):
         raise typer.Exit(code=1)
 
 @app.command()
-def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.Argument(...), max_iters: int | None = typer.Option(None)):
+def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.Argument(...),
+        max_iters: int | None = typer.Option(None),
+        log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
+    if log_level:
+        s.log_level = log_level
+    _init_logging_for_repo(path, s)
+    log = get_logger("cli")
     iters = s.loop_max_iters if max_iters is None else max_iters
+    log.info("Starting run loop with prompt: %s (max_iters=%d)", prompt[:100], iters)
     run_loop(path, prompt, max_iters=iters)
+    log.info("Run loop completed")
+    log_file = get_log_file()
+    if log_file:
+        print(f"[green]Log file[/green] {log_file}")
     print("[green]Done[/green]")

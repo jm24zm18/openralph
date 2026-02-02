@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import shutil
+import socket
 import subprocess
 import urllib.request
 from dataclasses import dataclass
@@ -86,6 +87,26 @@ def _venv_has_pylsp(repo: Path) -> bool:
             return True
     return False
 
+def _proxy_is_listening(port: int) -> bool:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex(("127.0.0.1", port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+def _proxy_pid_active(pid_file: Path) -> tuple[bool, int | None]:
+    if not pid_file.exists():
+        return False, None
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)
+        return True, pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        return False, None
+
 def ensure_tools(
     *,
     repo: Path,
@@ -159,7 +180,8 @@ def ensure_tools(
             results.append(ToolStatus("playwright-browsers-chromium", p.returncode == 0, p.stderr.strip() or p.stdout.strip()))
     return results
 
-def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn_mb: float = 200.0) -> list[ToolStatus]:
+def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn_mb: float = 200.0,
+                  proxy_enabled: bool = False, proxy_listen_port: int = 18889) -> list[ToolStatus]:
     repo = repo.resolve()
     local_bin = repo / ".ralph" / "node-tools" / "node_modules" / ".bin"
     statuses: list[ToolStatus] = []
@@ -192,4 +214,18 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
 
     statuses.append(ToolStatus("playwright-python", _have_python_module("playwright"),
                                "found" if _have_python_module("playwright") else "missing"))
+
+    if proxy_enabled:
+        pid_file = repo / ".ralph" / "proxy.pid"
+        pid_active, pid = _proxy_pid_active(pid_file)
+        port_listening = _proxy_is_listening(proxy_listen_port)
+
+        if pid_active and port_listening:
+            statuses.append(ToolStatus("proxy", True, f"running (PID {pid}) on port {proxy_listen_port}"))
+        elif port_listening:
+            statuses.append(ToolStatus("proxy", True, f"port {proxy_listen_port} in use (external process)"))
+        else:
+            statuses.append(ToolStatus("proxy", False, "not running",
+                                       hint="Run: openralph proxy start ."))
+
     return statuses

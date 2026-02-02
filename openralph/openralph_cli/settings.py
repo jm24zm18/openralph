@@ -75,6 +75,19 @@ class OpenRalphSettings:
         ".json", ".jsonc", ".yaml", ".yml", ".toml"
     ])
 
+    # Proxy
+    proxy_enabled: bool = False
+    proxy_listen_port: int = 18889
+    proxy_target_host: str = "127.0.0.1"
+    proxy_target_port: int = 30000
+    proxy_target_model: str = "openai/gpt-oss-120b"
+    proxy_provider_name: str = "openclaw"
+    proxy_provider_display: str = "DGX gpt-OSS"
+    proxy_model_id: str = "chatgpt-oss"
+    proxy_model_display: str = "ChatGPT-OSS 120B"
+    proxy_api_key: str = "LOCAL_DGX"
+    proxy_auto_start: bool = True
+
     @staticmethod
     def load(repo: Path) -> "OpenRalphSettings":
         repo = repo.resolve()
@@ -121,6 +134,19 @@ class OpenRalphSettings:
         s.memory_vacuum_warn_mb = float(mem.get("vacuum_warn_mb", s.memory_vacuum_warn_mb))
         s.memory_exclude_dirs = mem.get("exclude_dirs", s.memory_exclude_dirs)
         s.memory_include_exts = mem.get("include_exts", s.memory_include_exts)
+
+        prx = merged.get("proxy", {})
+        s.proxy_enabled = prx.get("enabled", s.proxy_enabled)
+        s.proxy_listen_port = int(prx.get("listen_port", s.proxy_listen_port))
+        s.proxy_target_host = prx.get("target_host", s.proxy_target_host)
+        s.proxy_target_port = int(prx.get("target_port", s.proxy_target_port))
+        s.proxy_target_model = prx.get("target_model", s.proxy_target_model)
+        s.proxy_provider_name = prx.get("provider_name", s.proxy_provider_name)
+        s.proxy_provider_display = prx.get("provider_display", s.proxy_provider_display)
+        s.proxy_model_id = prx.get("model_id", s.proxy_model_id)
+        s.proxy_model_display = prx.get("model_display", s.proxy_model_display)
+        s.proxy_api_key = prx.get("api_key", s.proxy_api_key)
+        s.proxy_auto_start = prx.get("auto_start", s.proxy_auto_start)
         return s
 
     def as_dict(self) -> dict:
@@ -150,6 +176,19 @@ class OpenRalphSettings:
                 "vacuum_warn_mb": self.memory_vacuum_warn_mb,
                 "exclude_dirs": self.memory_exclude_dirs,
                 "include_exts": self.memory_include_exts,
+            },
+            "proxy": {
+                "enabled": self.proxy_enabled,
+                "listen_port": self.proxy_listen_port,
+                "target_host": self.proxy_target_host,
+                "target_port": self.proxy_target_port,
+                "target_model": self.proxy_target_model,
+                "provider_name": self.proxy_provider_name,
+                "provider_display": self.proxy_provider_display,
+                "model_id": self.proxy_model_id,
+                "model_display": self.proxy_model_display,
+                "api_key": self.proxy_api_key,
+                "auto_start": self.proxy_auto_start,
             },
         }
 
@@ -184,4 +223,17 @@ chunk_overlap = 200
 vacuum_warn_mb = 200
 exclude_dirs = [".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"]
 include_exts = [".md", ".mdx", ".markdown", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".scss", ".less", ".json", ".jsonc", ".yaml", ".yml", ".toml"]
+
+[proxy]
+enabled = false                         # Enable OpenCode proxy server
+listen_port = 18889                     # Local port proxy listens on
+target_host = "127.0.0.1"               # Backend LLM host
+target_port = 30000                     # Backend LLM port
+target_model = "openai/gpt-oss-120b"    # Model name to send to backend
+provider_name = "openclaw"              # Provider ID in opencode.json
+provider_display = "DGX gpt-OSS"        # Provider display name
+model_id = "chatgpt-oss"                # Model ID in opencode.json
+model_display = "ChatGPT-OSS 120B"      # Model display name
+api_key = "LOCAL_DGX"                   # API key to use
+auto_start = true                       # Auto-start proxy on init/run
 """

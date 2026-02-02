@@ -12,22 +12,25 @@ from .settings import OpenRalphSettings, global_config_path, repo_config_path, S
 from .gitignore import GitignoreOptions, sync_gitignore, managed_block_is_current, render_managed_block
 from .policies import ensure_policies
 from .opencode_manager import ensure_opencode, install_opencode, find_opencode, opencode_version
-from .opencode_config import write_opencode_json, OpenCodeConfigOptions
+from .opencode_config import write_opencode_json, OpenCodeConfigOptions, ProxyProviderOptions
 from .skills_generator import write_default_skills
 from .tooling import ensure_tools, doctor_report
 from .memory import init_db, index_repo, query_memory, vacuum_db
 from .loop import run_loop
+from .proxy import ProxyConfig, start_proxy_background, stop_proxy, proxy_status, proxy_is_listening
 
 app = typer.Typer(help="OpenRalph: orchestrate OpenCode with skills, gates, git, and memory.")
 config_app = typer.Typer(help="Manage openralph configuration.")
 gitignore_app = typer.Typer(help="Manage repo .gitignore (openralph managed block).")
 opencode_app = typer.Typer(help="Manage the bundled OpenCode binary.")
 memory_app = typer.Typer(help="Memory index/query tools (SQLite + Ollama embeddings).")
+proxy_app = typer.Typer(help="Manage the OpenCode API proxy server.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(gitignore_app, name="gitignore")
 app.add_typer(opencode_app, name="opencode")
 app.add_typer(memory_app, name="memory")
+app.add_typer(proxy_app, name="proxy")
 
 @config_app.command("init")
 def config_init(
@@ -129,6 +132,82 @@ def memory_vacuum_cmd(repo: str = typer.Argument(".", help="Repo path")):
     vacuum_db(paths.memory_db)
     print(f"[green]Vacuumed[/green] {paths.memory_db}")
 
+@proxy_app.command("start")
+def proxy_start_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    path = ensure_repo(repo)
+    s = OpenRalphSettings.load(path)
+    paths = Paths.for_repo(path)
+
+    if not s.proxy_enabled:
+        print("[yellow]Proxy not enabled[/yellow] — set proxy.enabled = true in config")
+        raise typer.Exit(code=1)
+
+    running, existing_pid = proxy_status(paths.proxy_pid, s.proxy_listen_port)
+    if running:
+        print(f"[yellow]Proxy already running[/yellow] (PID {existing_pid}) on port {s.proxy_listen_port}")
+        return
+
+    if proxy_is_listening(s.proxy_listen_port):
+        print(f"[red]Port {s.proxy_listen_port} already in use[/red]")
+        raise typer.Exit(code=1)
+
+    config = ProxyConfig(
+        listen_port=s.proxy_listen_port,
+        target_host=s.proxy_target_host,
+        target_port=s.proxy_target_port,
+        target_model=s.proxy_target_model,
+    )
+    pid = start_proxy_background(config, paths.proxy_pid, paths.proxy_log)
+    print(f"[green]Started[/green] proxy (PID {pid}) on port {s.proxy_listen_port}")
+    print(f"  Target: {s.proxy_target_host}:{s.proxy_target_port}")
+    print(f"  Model:  {s.proxy_target_model}")
+    print(f"  Log:    {paths.proxy_log}")
+
+@proxy_app.command("stop")
+def proxy_stop_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    path = ensure_repo(repo)
+    paths = Paths.for_repo(path)
+
+    if stop_proxy(paths.proxy_pid):
+        print("[green]Stopped[/green] proxy")
+    else:
+        print("[yellow]Proxy not running[/yellow]")
+
+@proxy_app.command("status")
+def proxy_status_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    path = ensure_repo(repo)
+    s = OpenRalphSettings.load(path)
+    paths = Paths.for_repo(path)
+
+    if not s.proxy_enabled:
+        print("[yellow]Proxy not enabled[/yellow] — set proxy.enabled = true in config")
+        return
+
+    running, pid = proxy_status(paths.proxy_pid, s.proxy_listen_port)
+    if running:
+        print(f"[green]Running[/green] (PID {pid}) on port {s.proxy_listen_port}")
+        print(f"  Target: {s.proxy_target_host}:{s.proxy_target_port}")
+        print(f"  Model:  {s.proxy_target_model}")
+    else:
+        print("[yellow]Not running[/yellow]")
+
+@proxy_app.command("config")
+def proxy_config_cmd(repo: str = typer.Argument(".", help="Repo path")):
+    path = ensure_repo(repo)
+    s = OpenRalphSettings.load(path)
+    print("[bold]Proxy configuration[/bold]")
+    print(f"  enabled:          {s.proxy_enabled}")
+    print(f"  listen_port:      {s.proxy_listen_port}")
+    print(f"  target_host:      {s.proxy_target_host}")
+    print(f"  target_port:      {s.proxy_target_port}")
+    print(f"  target_model:     {s.proxy_target_model}")
+    print(f"  provider_name:    {s.proxy_provider_name}")
+    print(f"  provider_display: {s.proxy_provider_display}")
+    print(f"  model_id:         {s.proxy_model_id}")
+    print(f"  model_display:    {s.proxy_model_display}")
+    print(f"  api_key:          {s.proxy_api_key}")
+    print(f"  auto_start:       {s.proxy_auto_start}")
+
 @app.command()
 def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
          node_tooling: str | None = typer.Option(None, help="global|local"),
@@ -152,7 +231,16 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
         print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
 
     if s.init_with_opencode_json:
-        ocfg = write_opencode_json(path, force=s.init_force_opencode_json, opts=OpenCodeConfigOptions(node_tooling=node_tooling))
+        proxy_opts = ProxyProviderOptions(
+            enabled=s.proxy_enabled,
+            listen_port=s.proxy_listen_port,
+            provider_name=s.proxy_provider_name,
+            provider_display=s.proxy_provider_display,
+            model_id=s.proxy_model_id,
+            model_display=s.proxy_model_display,
+            api_key=s.proxy_api_key,
+        )
+        ocfg = write_opencode_json(path, force=s.init_force_opencode_json, opts=OpenCodeConfigOptions(node_tooling=node_tooling, proxy=proxy_opts))
         print(f"[green]Wrote[/green] {ocfg}")
 
     if s.init_write_skills:
@@ -186,6 +274,22 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
                 if r.hint:
                     print(f"  [yellow]Hint:[/yellow] {r.hint}")
 
+    if s.proxy_enabled and s.proxy_auto_start:
+        running, existing_pid = proxy_status(paths.proxy_pid, s.proxy_listen_port)
+        if running:
+            print(f"[green]OK[/green] proxy — already running (PID {existing_pid})")
+        elif proxy_is_listening(s.proxy_listen_port):
+            print(f"[yellow]WARN[/yellow] proxy — port {s.proxy_listen_port} in use by another process")
+        else:
+            config = ProxyConfig(
+                listen_port=s.proxy_listen_port,
+                target_host=s.proxy_target_host,
+                target_port=s.proxy_target_port,
+                target_model=s.proxy_target_model,
+            )
+            pid = start_proxy_background(config, paths.proxy_pid, paths.proxy_log)
+            print(f"[green]Started[/green] proxy (PID {pid}) on port {s.proxy_listen_port}")
+
     print(f"[green]Initialized[/green] {path}")
 
 @app.command()
@@ -202,7 +306,8 @@ def doctor(repo: str = typer.Argument(".", help="Repo path")):
         print("[red]FAIL[/red] opencode — not found")
         print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
 
-    for r in doctor_report(repo=path, ollama_host=s.ollama_host, embed_model=s.embed_model, vacuum_warn_mb=s.memory_vacuum_warn_mb):
+    for r in doctor_report(repo=path, ollama_host=s.ollama_host, embed_model=s.embed_model, vacuum_warn_mb=s.memory_vacuum_warn_mb,
+                           proxy_enabled=s.proxy_enabled, proxy_listen_port=s.proxy_listen_port):
         if r.ok:
             print(f"[green]OK[/green] {r.name} — {r.detail}")
         else:

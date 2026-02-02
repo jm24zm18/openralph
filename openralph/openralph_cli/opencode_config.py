@@ -1,13 +1,24 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import os
 
 @dataclass(frozen=True)
+class ProxyProviderOptions:
+    enabled: bool = False
+    listen_port: int = 18889
+    provider_name: str = "openclaw"
+    provider_display: str = "DGX gpt-OSS"
+    model_id: str = "chatgpt-oss"
+    model_display: str = "ChatGPT-OSS 120B"
+    api_key: str = "LOCAL_DGX"
+
+@dataclass(frozen=True)
 class OpenCodeConfigOptions:
     node_tooling: str = "global"  # global|local
     prefer_venvs: bool = True
+    proxy: ProxyProviderOptions = field(default_factory=ProxyProviderOptions)
 
 def _path_with_preference(opts: OpenCodeConfigOptions) -> str:
     parts = []
@@ -24,7 +35,7 @@ def _path_with_preference(opts: OpenCodeConfigOptions) -> str:
 
 def build_opencode_json(opts: OpenCodeConfigOptions) -> dict:
     lsp_env = {"PATH": _path_with_preference(opts)}
-    return {
+    config: dict = {
         "$schema": "https://opencode.ai/config.json",
         "permission": {
             "bash": "allow",
@@ -45,6 +56,36 @@ def build_opencode_json(opts: OpenCodeConfigOptions) -> dict:
             "css-local": {"command": ["vscode-css-language-server", "--stdio"], "extensions": [".css", ".scss", ".less"], "env": lsp_env},
         },
     }
+
+    if opts.proxy.enabled:
+        proxy_api = f"http://localhost:{opts.proxy.listen_port}/v1"
+        config["provider"] = {
+            opts.proxy.provider_name: {
+                "api": proxy_api,
+                "name": opts.proxy.provider_display,
+                "id": opts.proxy.provider_name,
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    f"{opts.proxy.model_id}:120b": {
+                        "id": opts.proxy.model_id,
+                        "name": opts.proxy.model_display,
+                    }
+                },
+                "options": {
+                    "apiKey": opts.proxy.api_key,
+                    "baseURL": proxy_api,
+                },
+            }
+        }
+        config["agent"] = {
+            "build": {
+                "permission": {
+                    "lsp": "allow",
+                }
+            }
+        }
+
+    return config
 
 def write_opencode_json(repo: Path, *, force: bool, opts: OpenCodeConfigOptions) -> Path:
     repo = repo.resolve()

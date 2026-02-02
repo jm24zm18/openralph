@@ -29,6 +29,7 @@ def render_managed_block(opts: GitignoreOptions) -> str:
     lines.append(".ralph/memory.sqlite3")
     lines.append(".ralph/memory.sqlite3-wal")
     lines.append(".ralph/memory.sqlite3-shm")
+    lines.append(".ralph/proxy.pid")
     if opts.node_tooling == "local":
         lines.append(".ralph/node-tools/")
     if opts.ignore_reports:

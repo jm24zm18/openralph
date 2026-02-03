@@ -92,7 +92,7 @@ def _collect_context(repo: Path) -> PRDContext:
     )
 
 
-def _build_prompt(ctx: PRDContext) -> str:
+def _build_prompt(ctx: PRDContext, extra_context: str | None = None) -> str:
     today = date.today().isoformat()
 
     context_parts = []
@@ -109,6 +109,7 @@ def _build_prompt(ctx: PRDContext) -> str:
 
     context_text = "\n".join(context_parts)
 
+    extra = f"\nADDITIONAL INPUTS:\n{extra_context}\n" if extra_context else ""
     prompt = f"""You are writing a PRD for the software repository '{ctx.repo_name}'.
 
 Output requirements:
@@ -145,11 +146,16 @@ Use the repository context below. If the repo is a developer tool, treat the 'us
 
 REPOSITORY CONTEXT:
 {context_text}
-"""
+{extra}"""
     return prompt
 
 
-def generate_prd(repo: Path, output_path: Path | None = None, opencode_path: Path | None = None) -> Path:
+def generate_prd(
+    repo: Path,
+    output_path: Path | None = None,
+    opencode_path: Path | None = None,
+    extra_context: str | None = None,
+) -> Path:
     """Generate a PRD for the repository using OpenCode."""
     if output_path is None:
         output_path = repo / "docs" / "PRD.md"
@@ -163,7 +169,7 @@ def generate_prd(repo: Path, output_path: Path | None = None, opencode_path: Pat
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     ctx = _collect_context(repo)
-    prompt = _build_prompt(ctx)
+    prompt = _build_prompt(ctx, extra_context=extra_context)
 
     # Run OpenCode
     result = subprocess.run(
@@ -180,6 +186,38 @@ def generate_prd(repo: Path, output_path: Path | None = None, opencode_path: Pat
     # Write output
     output_path.write_text(result.stdout, encoding="utf-8")
     return output_path
+
+def generate_prd_answers(repo: Path, opencode_path: Path | None = None) -> dict[str, str]:
+    """Generate PRD Q&A answers using OpenCode."""
+    if opencode_path is None:
+        result = find_opencode(repo)
+        if result is None:
+            raise RuntimeError("OpenCode not found. Run: openralph opencode install")
+        opencode_path = result.path
+
+    ctx = _collect_context(repo)
+    questions = "\n".join([f"- {k}: {q}" for k, q in PRD_QA_QUESTIONS])
+    prompt = f"""You are drafting PRD Q&A answers for the repository '{ctx.repo_name}'.
+
+Return a single JSON object with keys matching the question ids.
+Do not include extra commentary or markdown.
+
+Questions:
+{questions}
+"""
+    result = subprocess.run(
+        [str(opencode_path), "run", prompt],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"OpenCode failed: {result.stderr}")
+    try:
+        return json.loads(result.stdout)
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse PRD answers JSON: {e}") from e
 
 
 PRD_QA_QUESTIONS = [

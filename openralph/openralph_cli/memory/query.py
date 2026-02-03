@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import math, sqlite3, struct
-from typing import List
+from typing import List, Sequence, Tuple
 
 from .embed import ollama_embed
 from ..logging import get_logger
@@ -29,7 +29,21 @@ def _cosine(a: List[float], b: List[float]) -> float:
         return 0.0
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
-def query_memory(db_path: Path, ollama_host: str, embed_model: str, query: str, k: int = 8) -> list[MemoryHit]:
+def _apply_path_boost(path: str, score: float, boosts: Sequence[Tuple[str, float]]) -> float:
+    boosted = score
+    for prefix, factor in boosts:
+        if path == prefix or path.startswith(prefix):
+            boosted *= factor
+    return boosted
+
+def query_memory(
+    db_path: Path,
+    ollama_host: str,
+    embed_model: str,
+    query: str,
+    k: int = 8,
+    path_boosts: Sequence[Tuple[str, float]] | None = None,
+) -> list[MemoryHit]:
     log = get_logger("memory.query")
     log.debug("query_memory: db=%s, k=%d, query=%s", db_path, k, query[:100])
 
@@ -42,10 +56,12 @@ def query_memory(db_path: Path, ollama_host: str, embed_model: str, query: str, 
     con.close()
     log.debug("Loaded %d chunks from database", len(rows))
 
+    boosts = path_boosts or []
     hits: list[MemoryHit] = []
     for path, chunk_index, content, blob, dim in rows:
         vec = _unpack_f32(blob, dim)
         score = _cosine(qvec, vec)
+        score = _apply_path_boost(path, score, boosts)
         hits.append(MemoryHit(path, int(chunk_index), float(score), content))
 
     hits.sort(key=lambda h: h.score, reverse=True)

@@ -59,9 +59,16 @@ class OpenRalphSettings:
     loop_max_iters: int = 10
     loop_rollback_on_gate_fail: bool = False
     loop_max_gate_fails: int = 3
+    loop_prd_refresh_every: int = 0
+    loop_prd_refresh_mode: str = ""  # "" | "ask"
+    loop_prd_qa_mode: str = "handoff"  # interactive|handoff|auto|auto-then-handoff
+    loop_test_report: str = ".ralph/TEST_REPORT.md"
+    loop_review_report: str = ".ralph/REVIEW_REPORT.md"
+    loop_final_report: str = ".ralph/FINAL.md"
 
     # Memory
     memory_k: int = 8
+    memory_inject_max_chars: int = 6000
     memory_chunk_chars: int = 1800
     memory_chunk_overlap: int = 200
     memory_vacuum_warn_mb: float = 200.0
@@ -146,9 +153,16 @@ class OpenRalphSettings:
         s.loop_max_iters = loop.get("max_iters", s.loop_max_iters)
         s.loop_rollback_on_gate_fail = loop.get("rollback_on_gate_fail", s.loop_rollback_on_gate_fail)
         s.loop_max_gate_fails = loop.get("max_gate_fails", s.loop_max_gate_fails)
+        s.loop_prd_refresh_every = int(loop.get("prd_refresh_every", s.loop_prd_refresh_every))
+        s.loop_prd_refresh_mode = loop.get("prd_refresh_mode", s.loop_prd_refresh_mode) or ""
+        s.loop_prd_qa_mode = loop.get("prd_qa_mode", s.loop_prd_qa_mode) or s.loop_prd_qa_mode
+        s.loop_test_report = loop.get("test_report", s.loop_test_report)
+        s.loop_review_report = loop.get("review_report", s.loop_review_report)
+        s.loop_final_report = loop.get("final_report", s.loop_final_report)
 
         mem = merged.get("memory", {})
         s.memory_k = mem.get("k", s.memory_k)
+        s.memory_inject_max_chars = int(mem.get("inject_max_chars", s.memory_inject_max_chars))
         s.memory_chunk_chars = mem.get("chunk_chars", s.memory_chunk_chars)
         s.memory_chunk_overlap = mem.get("chunk_overlap", s.memory_chunk_overlap)
         s.memory_vacuum_warn_mb = float(mem.get("vacuum_warn_mb", s.memory_vacuum_warn_mb))
@@ -211,9 +225,16 @@ class OpenRalphSettings:
                 "max_iters": self.loop_max_iters,
                 "rollback_on_gate_fail": self.loop_rollback_on_gate_fail,
                 "max_gate_fails": self.loop_max_gate_fails,
+                "prd_refresh_every": self.loop_prd_refresh_every,
+                "prd_refresh_mode": self.loop_prd_refresh_mode,
+                "prd_qa_mode": self.loop_prd_qa_mode,
+                "test_report": self.loop_test_report,
+                "review_report": self.loop_review_report,
+                "final_report": self.loop_final_report,
             },
             "memory": {
                 "k": self.memory_k,
+                "inject_max_chars": self.memory_inject_max_chars,
                 "chunk_chars": self.memory_chunk_chars,
                 "chunk_overlap": self.memory_chunk_overlap,
                 "vacuum_warn_mb": self.memory_vacuum_warn_mb,
@@ -272,9 +293,16 @@ playwright_browsers = true
 max_iters = 10
 rollback_on_gate_fail = false
 max_gate_fails = 3
+prd_refresh_every = 0
+prd_refresh_mode = ""      # "" or "ask"
+prd_qa_mode = "handoff"    # interactive|handoff|auto|auto-then-handoff
+test_report = ".ralph/TEST_REPORT.md"
+review_report = ".ralph/REVIEW_REPORT.md"
+final_report = ".ralph/FINAL.md"
 
 [memory]
 k = 8
+inject_max_chars = 6000
 chunk_chars = 1800
 chunk_overlap = 200
 vacuum_warn_mb = 200

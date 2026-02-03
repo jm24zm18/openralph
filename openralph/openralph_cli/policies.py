@@ -1,15 +1,22 @@
 from __future__ import annotations
 from pathlib import Path
+from importlib import resources
 
-TEST_POLICY = """# Test policy (template)
-- Prefer project-defined test commands (pyproject/package.json).
-- Fall back to extension-based defaults.
-"""
+def _read_template(name: str, fallback: str) -> str:
+    try:
+        return resources.files("openralph.templates").joinpath(name).read_text(encoding="utf-8")
+    except Exception:
+        return fallback
 
-INSTALL_POLICY = """# Install policy (template)
-- Prefer local installs (venv for python, .ralph/node-tools for node).
-- Avoid global installs unless explicitly allowed.
-"""
+TEST_POLICY = _read_template(
+    "test-policy.md",
+    "# Test policy (template)\n- Prefer project-defined test commands (pyproject/package.json).\n- Fall back to extension-based defaults.\n",
+)
+
+INSTALL_POLICY = _read_template(
+    "install-policy.md",
+    "# Install policy (template)\n- Prefer local installs (venv for python, .ralph/node-tools for node).\n- Avoid global installs unless explicitly allowed.\n",
+)
 
 def ensure_policies(repo: Path) -> None:
     ralph = repo / ".ralph"

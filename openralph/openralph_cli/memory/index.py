@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Iterable, List, Tuple
 
 from .embed import ollama_embed
+from .db import init_db
 from ..logging import get_logger
 
 DEFAULT_INCLUDE_EXTS = {
@@ -17,6 +18,8 @@ DEFAULT_INCLUDE_EXTS = {
     ".json", ".jsonc", ".yaml", ".yml", ".toml"
 }
 DEFAULT_EXCLUDE_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"}
+
+INDEX_VERSION = "1"
 
 @dataclass(frozen=True)
 class Chunk:
@@ -56,6 +59,20 @@ def iter_files(root: Path, include_exts: set[str], exclude_dirs: set[str]) -> It
             continue
         if p.suffix.lower() in include_exts:
             yield p
+
+def _index_fingerprint(embed_model: str, chunk_chars: int, chunk_overlap: int) -> str:
+    return f"v{INDEX_VERSION}|model={embed_model}|chunk_chars={chunk_chars}|chunk_overlap={chunk_overlap}"
+
+def _ensure_index_version(con: sqlite3.Connection, *, embed_model: str, chunk_chars: int, chunk_overlap: int) -> None:
+    log = get_logger("memory.index")
+    fp = _index_fingerprint(embed_model, chunk_chars, chunk_overlap)
+    row = con.execute("SELECT value FROM meta WHERE key='index_fingerprint'").fetchone()
+    if row and row[0] == fp:
+        return
+    log.info("Memory index fingerprint changed; rebuilding index")
+    con.execute("DELETE FROM chunks;")
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('index_fingerprint', ?);", (fp,))
+    con.commit()
 
 def upsert_chunk(con: sqlite3.Connection, c: Chunk, emb: List[float], scan_id: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
@@ -99,9 +116,11 @@ def index_repo(
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
 
     log.debug("Starting index_repo: db=%s, host=%s, model=%s", db_path, ollama_host, embed_model)
+    init_db(db_path)
     con = sqlite3.connect(db_path)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
+    _ensure_index_version(con, embed_model=embed_model, chunk_chars=chunk_chars, chunk_overlap=chunk_overlap)
 
     root = repo.resolve()
     repo_name = root.name

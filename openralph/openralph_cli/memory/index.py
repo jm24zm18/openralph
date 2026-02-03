@@ -18,6 +18,7 @@ DEFAULT_INCLUDE_EXTS = {
     ".json", ".jsonc", ".yaml", ".yml", ".toml"
 }
 DEFAULT_EXCLUDE_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"}
+DEFAULT_EXCLUDE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", ".DS_Store", "Thumbs.db"}
 
 INDEX_VERSION = "1"
 
@@ -50,12 +51,16 @@ def chunk_text(text: str, max_chars: int, overlap: int) -> List[Tuple[int,int,st
         i = max(0, j - overlap)
     return out
 
-def iter_files(root: Path, include_exts: set[str], exclude_dirs: set[str]) -> Iterable[Path]:
+def iter_files(root: Path, include_exts: set[str], exclude_dirs: set[str],
+               exclude_names: set[str] | None = None) -> Iterable[Path]:
+    exclude_names = exclude_names or set()
     for p in root.rglob("*"):
         if p.is_dir():
             continue
         rel_parts = p.relative_to(root).parts
         if any(part in exclude_dirs for part in rel_parts):
+            continue
+        if p.name in exclude_names:
             continue
         if p.suffix.lower() in include_exts:
             yield p
@@ -108,12 +113,14 @@ def index_repo(
     batch: int = 6,
     include_exts: set[str] | None = None,
     exclude_dirs: set[str] | None = None,
+    exclude_names: set[str] | None = None,
     chunk_chars: int = 1800,
     chunk_overlap: int = 200,
 ) -> None:
     log = get_logger("memory.index")
     include_exts = include_exts or DEFAULT_INCLUDE_EXTS
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
+    exclude_names = exclude_names or DEFAULT_EXCLUDE_NAMES
 
     log.debug("Starting index_repo: db=%s, host=%s, model=%s", db_path, ollama_host, embed_model)
     init_db(db_path)
@@ -130,7 +137,7 @@ def index_repo(
     files_processed = 0
     chunks_embedded = 0
 
-    for fp in iter_files(root, include_exts, exclude_dirs):
+    for fp in iter_files(root, include_exts, exclude_dirs, exclude_names):
         rel = fp.relative_to(root).as_posix()
         try:
             text = fp.read_text(encoding="utf-8", errors="ignore")
@@ -166,7 +173,7 @@ def index_repo(
                     chunks_embedded += 1
                 except Exception as e:
                     log.warning("Failed to embed chunk %s#%d: %s", c.path, c.chunk_index, e)
-                    raise
+                    continue
             con.commit()
 
         con.execute("DELETE FROM chunks WHERE doc_id=? AND chunk_index>=?", (doc_id, len(chunks)))

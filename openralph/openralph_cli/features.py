@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from importlib import resources
 
 
 @dataclass
@@ -14,60 +15,26 @@ class FeatureFolder:
     is_current: bool = False
 
 
-BRIEF_TEMPLATE = """# {title}
+def _read_template(name: str, fallback: str) -> str:
+    try:
+        return resources.files("openralph.templates").joinpath(name).read_text(encoding="utf-8")
+    except Exception:
+        return fallback
 
-## Summary
+BRIEF_TEMPLATE = _read_template(
+    "00-brief.md",
+    "# {title}\n\n## Summary\n\n{description}\n\n## Why\n\n- TBD\n\n## Owner\n\n- TBD\n",
+)
 
-{description}
+REQUIREMENTS_TEMPLATE = _read_template(
+    "01-requirements.md",
+    "# Requirements: {title}\n\n## Goals\n\n- TBD\n\n## Non-goals\n\n- TBD\n\n## Acceptance criteria\n\n- [ ] TBD\n\n## Dependencies\n\n- None\n",
+)
 
-## Why
-
-- TBD
-
-## Owner
-
-- TBD
-"""
-
-REQUIREMENTS_TEMPLATE = """# Requirements: {title}
-
-## Goals
-
-- TBD
-
-## Non-goals
-
-- TBD
-
-## Acceptance criteria
-
-- [ ] TBD
-
-## Dependencies
-
-- None
-"""
-
-TEST_PLAN_TEMPLATE = """# Test Plan: {title}
-
-## Unit tests
-
-- TBD
-
-## Integration tests
-
-- TBD
-
-## Manual verification
-
-- [ ] TBD
-
-## Gate criteria
-
-- All unit tests pass
-- All integration tests pass
-- Manual verification complete
-"""
+TEST_PLAN_TEMPLATE = _read_template(
+    "03-test-plan.md",
+    "# Test Plan: {title}\n\n## Unit tests\n\n- TBD\n\n## Integration tests\n\n- TBD\n\n## Manual verification\n\n- [ ] TBD\n\n## Gate criteria\n\n- All unit tests pass\n- All integration tests pass\n- Manual verification complete\n",
+)
 
 
 def _slugify(text: str, max_len: int = 40) -> str:

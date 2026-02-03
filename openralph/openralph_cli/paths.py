@@ -23,6 +23,7 @@ class Paths:
     review_report: Path
     final_report: Path
     done_marker: Path
+    last_green: Path
 
     @staticmethod
     def for_repo(repo: Path) -> "Paths":
@@ -49,4 +50,5 @@ class Paths:
             review_report=ralph / "REVIEW_REPORT.md",
             final_report=ralph / "FINAL.md",
             done_marker=ralph / "DONE",
+            last_green=ralph / "LAST_GREEN.sha",
         )

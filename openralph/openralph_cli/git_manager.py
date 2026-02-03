@@ -17,8 +17,23 @@ def is_git_repo(repo: Path) -> bool:
     p = _run(repo, ["git", "rev-parse", "--is-inside-work-tree"])
     return p.returncode == 0 and p.stdout.strip() == "true"
 
+def is_worktree_dirty(repo: Path) -> bool:
+    p = _run(repo, ["git", "status", "--porcelain"])
+    return p.returncode == 0 and bool(p.stdout.strip())
+
+def worktree_status(repo: Path, max_lines: int = 20) -> str:
+    p = _run(repo, ["git", "status", "--porcelain"])
+    if p.returncode != 0:
+        return ""
+    lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
+    return "\n".join(lines[:max_lines])
+
 def current_branch(repo: Path) -> str:
     p = _run(repo, ["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+def head_sha(repo: Path) -> str:
+    p = _run(repo, ["git", "rev-parse", "HEAD"])
     return p.stdout.strip() if p.returncode == 0 else ""
 
 def ensure_branch(repo: Path, slug: str, prefix: str = "openralph/") -> str:
@@ -59,6 +74,23 @@ def checkpoint_commit(repo: Path, message: str) -> str:
     log.info("Checkpoint commit created: %s", sha[:8])
     return sha
 
+def write_diff_snapshot(repo: Path, out_path: Path) -> None:
+    log = get_logger("git")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    p1 = _run(repo, ["git", "diff"])
+    p2 = _run(repo, ["git", "diff", "--cached"])
+    diff = (p1.stdout or "") + ("\n" if p1.stdout and p2.stdout else "") + (p2.stdout or "")
+    out_path.write_text(diff, encoding="utf-8")
+    log.info("Wrote diff snapshot: %s", out_path)
+
+def update_last_green(repo: Path, sha: str, last_green_path: Path, tag_name: str = "ralph-green") -> None:
+    log = get_logger("git")
+    last_green_path.parent.mkdir(parents=True, exist_ok=True)
+    last_green_path.write_text(sha, encoding="utf-8")
+    p = _run(repo, ["git", "tag", "-f", tag_name, sha])
+    if p.returncode != 0:
+        log.warning("Failed to update tag %s: %s", tag_name, p.stderr.strip()[:200])
+
 def latest_checkpoint(repo: Path, prefix: str = "openralph: checkpoint") -> str | None:
     p = _run(repo, ["git", "log", "--pretty=%H:%s", "-n", "50"])
     if p.returncode != 0:
@@ -84,3 +116,13 @@ def rollback_to_checkpoint(repo: Path) -> str:
         raise RuntimeError(p.stderr.strip() or p.stdout.strip())
     log.info("Rollback complete")
     return sha
+
+def rollback_to_ref(repo: Path, ref: str) -> str:
+    log = get_logger("git")
+    log.info("Rolling back to ref: %s", ref)
+    p = _run(repo, ["git", "reset", "--hard", ref])
+    if p.returncode != 0:
+        log.error("Rollback failed: %s", p.stderr.strip())
+        raise RuntimeError(p.stderr.strip() or p.stdout.strip())
+    log.info("Rollback complete")
+    return ref

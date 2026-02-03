@@ -380,16 +380,25 @@ def doctor(repo: str = typer.Argument(".", help="Repo path"),
 @app.command()
 def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.Argument(...),
         max_iters: int | None = typer.Option(None),
+        prd_refresh_every: int | None = typer.Option(None, help="Regenerate PRD every N iterations (0 disables)"),
+        prd_refresh_mode: str | None = typer.Option(None, help="PRD refresh mode: '' or 'ask'"),
+        prd_qa_mode: str | None = typer.Option(None, help="PRD Q&A mode: interactive|handoff|auto|auto-then-handoff"),
         log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
     if log_level:
         s.log_level = log_level
+    if prd_refresh_every is not None:
+        s.loop_prd_refresh_every = prd_refresh_every
+    if prd_refresh_mode is not None:
+        s.loop_prd_refresh_mode = prd_refresh_mode
+    if prd_qa_mode is not None:
+        s.loop_prd_qa_mode = prd_qa_mode
     _init_logging_for_repo(path, s)
     log = get_logger("cli")
     iters = s.loop_max_iters if max_iters is None else max_iters
     log.info("Starting run loop with prompt: %s (max_iters=%d)", prompt[:100], iters)
-    run_loop(path, prompt, max_iters=iters)
+    run_loop(path, prompt, max_iters=iters, settings=s)
     log.info("Run loop completed")
     log_file = get_log_file()
     if log_file:

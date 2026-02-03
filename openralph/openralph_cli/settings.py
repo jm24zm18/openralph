@@ -62,9 +62,20 @@ class OpenRalphSettings:
     loop_prd_refresh_every: int = 0
     loop_prd_refresh_mode: str = ""  # "" | "ask"
     loop_prd_qa_mode: str = "handoff"  # interactive|handoff|auto|auto-then-handoff
+    loop_human_response: str = "stop"  # stop|auto
     loop_test_report: str = ".ralph/TEST_REPORT.md"
     loop_review_report: str = ".ralph/REVIEW_REPORT.md"
     loop_final_report: str = ".ralph/FINAL.md"
+
+    # Orchestrator
+    orchestrator_enabled: bool = True  # Auto-enable when PRD exists
+    orchestrator_replan_every: int = 3
+    orchestrator_max_tasks: int = 10
+
+    # Web search
+    web_search_enabled: bool = False
+    web_search_provider: str = "duckduckgo"  # duckduckgo|tavily
+    tavily_api_key: str = ""
 
     # Memory
     memory_k: int = 8
@@ -72,6 +83,7 @@ class OpenRalphSettings:
     memory_chunk_chars: int = 1800
     memory_chunk_overlap: int = 200
     memory_vacuum_warn_mb: float = 200.0
+    memory_path_boosts: list[tuple[str, float]] = field(default_factory=list)
     memory_exclude_dirs: list[str] = field(default_factory=lambda: [".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"])
     memory_include_exts: list[str] = field(default_factory=lambda: [
         ".md", ".mdx", ".markdown", ".txt",
@@ -80,6 +92,10 @@ class OpenRalphSettings:
         ".html", ".htm",
         ".css", ".scss", ".less",
         ".json", ".jsonc", ".yaml", ".yml", ".toml"
+    ])
+    memory_exclude_names: list[str] = field(default_factory=lambda: [
+        "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+        ".DS_Store", "Thumbs.db"
     ])
 
     # Logging
@@ -110,10 +126,10 @@ class OpenRalphSettings:
     agent_test_model: str = ""
     agent_review_model: str = ""
     # Per-agent permissions
-    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "edit", "skill", "lsp", "question"])
-    agent_plan_permissions: list[str] = field(default_factory=lambda: ["skill", "question"])
-    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "skill", "lsp", "question"])
-    agent_review_permissions: list[str] = field(default_factory=lambda: ["skill", "question"])
+    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search"])
+    agent_plan_permissions: list[str] = field(default_factory=lambda: ["skill", "question", "repo_browser", "external_directory"])
+    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "skill", "lsp", "question", "repo_browser", "external_directory"])
+    agent_review_permissions: list[str] = field(default_factory=lambda: ["skill", "question", "repo_browser", "external_directory"])
 
     @staticmethod
     def load(repo: Path) -> "OpenRalphSettings":
@@ -156,9 +172,26 @@ class OpenRalphSettings:
         s.loop_prd_refresh_every = int(loop.get("prd_refresh_every", s.loop_prd_refresh_every))
         s.loop_prd_refresh_mode = loop.get("prd_refresh_mode", s.loop_prd_refresh_mode) or ""
         s.loop_prd_qa_mode = loop.get("prd_qa_mode", s.loop_prd_qa_mode) or s.loop_prd_qa_mode
+        s.loop_human_response = loop.get("human_response", s.loop_human_response) or s.loop_human_response
         s.loop_test_report = loop.get("test_report", s.loop_test_report)
         s.loop_review_report = loop.get("review_report", s.loop_review_report)
         s.loop_final_report = loop.get("final_report", s.loop_final_report)
+
+        orch = merged.get("orchestrator", {})
+        enabled = orch.get("enabled")
+        if enabled is None:
+            s.orchestrator_enabled = (repo / "docs" / "PRD.md").exists()
+        else:
+            s.orchestrator_enabled = bool(enabled)
+        s.orchestrator_replan_every = int(orch.get("replan_every", s.orchestrator_replan_every))
+        s.orchestrator_max_tasks = int(orch.get("max_tasks", s.orchestrator_max_tasks))
+
+        web = merged.get("web_search", {})
+        s.web_search_enabled = bool(web.get("enabled", s.web_search_enabled))
+        s.web_search_provider = web.get("provider", s.web_search_provider) or s.web_search_provider
+        s.tavily_api_key = web.get("tavily_api_key", s.tavily_api_key) or s.tavily_api_key
+        if os.environ.get("TAVILY_API_KEY"):
+            s.tavily_api_key = os.environ["TAVILY_API_KEY"]
 
         mem = merged.get("memory", {})
         s.memory_k = mem.get("k", s.memory_k)
@@ -166,8 +199,27 @@ class OpenRalphSettings:
         s.memory_chunk_chars = mem.get("chunk_chars", s.memory_chunk_chars)
         s.memory_chunk_overlap = mem.get("chunk_overlap", s.memory_chunk_overlap)
         s.memory_vacuum_warn_mb = float(mem.get("vacuum_warn_mb", s.memory_vacuum_warn_mb))
+        raw_boosts = mem.get("path_boosts", s.memory_path_boosts)
+        boosts: list[tuple[str, float]] = []
+        if isinstance(raw_boosts, dict):
+            for key, val in raw_boosts.items():
+                boosts.append((str(key), float(val)))
+        elif isinstance(raw_boosts, list):
+            for item in raw_boosts:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    boosts.append((str(item[0]), float(item[1])))
+                elif isinstance(item, dict):
+                    for key, val in item.items():
+                        boosts.append((str(key), float(val)))
+        s.memory_path_boosts = boosts
         s.memory_exclude_dirs = mem.get("exclude_dirs", s.memory_exclude_dirs)
         s.memory_include_exts = mem.get("include_exts", s.memory_include_exts)
+        s.memory_exclude_names = mem.get("exclude_names", s.memory_exclude_names)
+        if s.memory_chunk_overlap >= s.memory_chunk_chars:
+            raise ValueError("memory.chunk_overlap must be less than memory.chunk_chars")
+        for path, factor in s.memory_path_boosts:
+            if factor <= 0:
+                raise ValueError(f\"memory.path_boosts factor must be > 0 (path={path})\")
 
         log = merged.get("logging", {})
         s.log_level = log.get("level", s.log_level)
@@ -228,9 +280,20 @@ class OpenRalphSettings:
                 "prd_refresh_every": self.loop_prd_refresh_every,
                 "prd_refresh_mode": self.loop_prd_refresh_mode,
                 "prd_qa_mode": self.loop_prd_qa_mode,
+                "human_response": self.loop_human_response,
                 "test_report": self.loop_test_report,
                 "review_report": self.loop_review_report,
                 "final_report": self.loop_final_report,
+            },
+            "orchestrator": {
+                "enabled": self.orchestrator_enabled,
+                "replan_every": self.orchestrator_replan_every,
+                "max_tasks": self.orchestrator_max_tasks,
+            },
+            "web_search": {
+                "enabled": self.web_search_enabled,
+                "provider": self.web_search_provider,
+                "tavily_api_key": self.tavily_api_key,
             },
             "memory": {
                 "k": self.memory_k,
@@ -238,8 +301,10 @@ class OpenRalphSettings:
                 "chunk_chars": self.memory_chunk_chars,
                 "chunk_overlap": self.memory_chunk_overlap,
                 "vacuum_warn_mb": self.memory_vacuum_warn_mb,
+                "path_boosts": [[path, factor] for path, factor in self.memory_path_boosts],
                 "exclude_dirs": self.memory_exclude_dirs,
                 "include_exts": self.memory_include_exts,
+                "exclude_names": self.memory_exclude_names,
             },
             "logging": {
                 "level": self.log_level,
@@ -296,9 +361,20 @@ max_gate_fails = 3
 prd_refresh_every = 0
 prd_refresh_mode = ""      # "" or "ask"
 prd_qa_mode = "handoff"    # interactive|handoff|auto|auto-then-handoff
+human_response = "stop"    # stop|auto
 test_report = ".ralph/TEST_REPORT.md"
 review_report = ".ralph/REVIEW_REPORT.md"
 final_report = ".ralph/FINAL.md"
+
+[orchestrator]
+enabled = true             # Auto-enabled when docs/PRD.md exists
+replan_every = 3           # Re-analyze PRD every N iterations
+max_tasks = 10             # Max tasks to plan at once
+
+[web_search]
+enabled = false            # Enable web search tool
+provider = "duckduckgo"    # duckduckgo|tavily
+tavily_api_key = ""        # Optional for Tavily
 
 [memory]
 k = 8
@@ -306,8 +382,10 @@ inject_max_chars = 6000
 chunk_chars = 1800
 chunk_overlap = 200
 vacuum_warn_mb = 200
+path_boosts = []           # List of [path, factor] boosts (factor > 0)
 exclude_dirs = [".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"]
 include_exts = [".md", ".mdx", ".markdown", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".scss", ".less", ".json", ".jsonc", ".yaml", ".yml", ".toml"]
+exclude_names = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"]
 
 [logging]
 level = "INFO"                          # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -334,17 +412,17 @@ default_model = ""                      # Default model for all agents (empty = 
 
 [agents.code]
 model = ""                              # Model override for code agent (empty = use default)
-permissions = ["bash", "edit", "skill", "lsp", "question"]
+permissions = ["bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search"]
 
 [agents.plan]
 model = ""                              # Model override for plan agent (empty = use default)
-permissions = ["skill", "question"]     # Plan agent: read-only, no edit/bash
+permissions = ["skill", "question", "repo_browser", "external_directory"]     # Plan agent: read-only, no edit/bash
 
 [agents.test]
 model = ""                              # Model override for test agent (empty = use default)
-permissions = ["bash", "skill", "lsp", "question"]  # Test agent: can run tests, no edit
+permissions = ["bash", "skill", "lsp", "question", "repo_browser", "external_directory"]  # Test agent: can run tests, no edit
 
 [agents.review]
 model = ""                              # Model override for review agent (empty = use default)
-permissions = ["skill", "question"]     # Review agent: read-only analysis
+permissions = ["skill", "question", "repo_browser", "external_directory"]     # Review agent: read-only analysis
 """

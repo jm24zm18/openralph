@@ -18,7 +18,7 @@ class ProxyProviderOptions:
 class AgentConfig:
     name: str
     model: str = ""  # empty = use default
-    permissions: tuple[str, ...] = ("bash", "edit", "skill", "lsp", "question")
+    permissions: tuple[str, ...] = ("bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search")
 
 @dataclass(frozen=True)
 class AgentsOptions:
@@ -27,11 +27,11 @@ class AgentsOptions:
     default_model: str = ""  # empty = use proxy model
     code: AgentConfig = field(default_factory=lambda: AgentConfig(name="code"))
     plan: AgentConfig = field(default_factory=lambda: AgentConfig(
-        name="plan", permissions=("skill", "question")))
+        name="plan", permissions=("skill", "question", "repo_browser", "external_directory")))
     test: AgentConfig = field(default_factory=lambda: AgentConfig(
-        name="test", permissions=("bash", "skill", "lsp", "question")))
+        name="test", permissions=("bash", "skill", "lsp", "question", "repo_browser", "external_directory")))
     review: AgentConfig = field(default_factory=lambda: AgentConfig(
-        name="review", permissions=("skill", "question")))
+        name="review", permissions=("skill", "question", "repo_browser", "external_directory")))
 
 @dataclass(frozen=True)
 class OpenCodeConfigOptions:
@@ -63,6 +63,9 @@ def build_opencode_json(opts: OpenCodeConfigOptions) -> dict:
             "skill": "allow",
             "lsp": "allow",
             "question": "allow",
+            "repo_browser": "allow",
+            "external_directory": "allow",
+            "web_search": "allow",
         },
         "lsp": {
             "pylsp": {"command": ["pylsp"], "extensions": [".py", ".pyi"], "env": lsp_env},

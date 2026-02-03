@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 import typer
 from rich import print
@@ -23,6 +24,7 @@ from .proxy import ProxyConfig, start_proxy_background, stop_proxy, proxy_status
 from .prd import generate_prd, run_prd_qa, generate_prd_from_answers, save_prd_answers, load_prd_answers
 from .features import create_feature, list_features, get_current_feature, set_current_feature, get_feature_context
 from .agents import generate_agents_md, agents_md_exists
+from .orchestrator import run_orchestrator, load_task_status, select_next_task, format_task_brief
 
 app = typer.Typer(help="OpenRalph: orchestrate OpenCode with skills, gates, git, and memory.")
 config_app = typer.Typer(help="Manage openralph configuration.")
@@ -86,14 +88,28 @@ def config_show(repo: str = typer.Option(".", help="Repo path")):
 def gitignore_show(repo: str = typer.Argument(".", help="Repo path")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
-    opts = GitignoreOptions(ignore_reports=True, track_current_feature=True, node_tooling=s.init_node_tooling, playwright=s.init_playwright, ignore_venvs=True)
+    opts = GitignoreOptions(
+        ignore_reports=True,
+        track_current_feature=True,
+        node_tooling=s.init_node_tooling,
+        playwright=s.init_playwright,
+        ignore_venvs=True,
+        report_paths=[s.loop_test_report, s.loop_review_report, s.loop_final_report],
+    )
     print(render_managed_block(opts))
 
 @gitignore_app.command("sync")
 def gitignore_sync(repo: str = typer.Argument(".", help="Repo path")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
-    opts = GitignoreOptions(ignore_reports=True, track_current_feature=True, node_tooling=s.init_node_tooling, playwright=s.init_playwright, ignore_venvs=True)
+    opts = GitignoreOptions(
+        ignore_reports=True,
+        track_current_feature=True,
+        node_tooling=s.init_node_tooling,
+        playwright=s.init_playwright,
+        ignore_venvs=True,
+        report_paths=[s.loop_test_report, s.loop_review_report, s.loop_final_report],
+    )
     gi = sync_gitignore(path, opts)
     print(f"[green]Synced[/green] {gi}")
 
@@ -132,6 +148,7 @@ def memory_index_cmd(repo: str = typer.Argument(".", help="Repo path")):
     init_db(paths.memory_db)
     index_repo(path, paths.memory_db, s.ollama_host, s.embed_model,
               include_exts=set(s.memory_include_exts), exclude_dirs=set(s.memory_exclude_dirs),
+              exclude_names=set(s.memory_exclude_names),
               chunk_chars=s.memory_chunk_chars, chunk_overlap=s.memory_chunk_overlap)
     print(f"[green]Indexed[/green] {paths.memory_db}")
 
@@ -235,6 +252,7 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
          node_tooling: str | None = typer.Option(None, help="global|local"),
          create_venv: bool | None = typer.Option(None, help="Create .venv if missing"),
          log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
+    print("[openralph] init: start")
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
     if log_level:
@@ -245,13 +263,36 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
     paths = Paths.for_repo(path)
     paths.ralph.mkdir(parents=True, exist_ok=True)
     paths.logs.mkdir(parents=True, exist_ok=True)
+    print("[openralph] init: logging")
     _init_logging_for_repo(path, s)
     log = get_logger("cli")
     log.info("Initializing repository: %s", path)
+
+    # Check if git repo exists, if not initialize it
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(path),
+            capture_output=True,
+            text=True
+        )
+        is_git_repo = result.returncode == 0
+    except Exception:
+        is_git_repo = False
+
+    if not is_git_repo:
+        print("[openralph] init: git init")
+        subprocess.run(["git", "init"], cwd=str(path), check=True)
+        log.info("Initialized git repository")
+        print("[green]Initialized[/green] git repository")
+
+    print("[openralph] init: policies")
     ensure_policies(path)
+    print("[openralph] init: memory db")
     init_db(paths.memory_db)
 
     try:
+        print("[openralph] init: opencode")
         oc = ensure_opencode(path, auto_install=s.opencode_auto_install, version=s.opencode_version)
         log.info("OpenCode found: %s (%s)", oc.path, oc.source)
         print(f"[green]OpenCode[/green] {oc.path} ({oc.source})")
@@ -261,6 +302,7 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
         print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
 
     if s.init_with_opencode_json:
+        print("[openralph] init: opencode.json")
         proxy_opts = ProxyProviderOptions(
             enabled=s.proxy_enabled,
             listen_port=s.proxy_listen_port,
@@ -283,14 +325,23 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
         print(f"[green]Wrote[/green] {ocfg}")
 
     if s.init_write_skills:
+        print("[openralph] init: skills")
         write_default_skills(path, force=s.init_force_skills)
         print("[green]Wrote[/green] .opencode/skills/*")
 
-    opts = GitignoreOptions(ignore_reports=True, track_current_feature=True, node_tooling=node_tooling, playwright=s.init_playwright, ignore_venvs=True)
+    opts = GitignoreOptions(
+        ignore_reports=True,
+        track_current_feature=True,
+        node_tooling=node_tooling,
+        playwright=s.init_playwright,
+        ignore_venvs=True,
+        report_paths=[s.loop_test_report, s.loop_review_report, s.loop_final_report],
+    )
     sync_gitignore(path, opts)
     print("[green]Synced[/green] .gitignore (managed block)")
 
     if create_venv:
+        print("[openralph] init: venv")
         import os
         venv_dir = path / ".venv"
         if os.name == "nt":
@@ -303,9 +354,14 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
             print("[green]Created[/green] .venv")
 
     if s.init_install_tools:
+        print("[openralph] init: tools")
+        print("[openralph] init: tools (this can take a few minutes on first run)")
+        start_tools = time.time()
         results = ensure_tools(repo=path, install=True, node_tooling=node_tooling,
                               install_playwright=s.init_playwright, install_playwright_browsers=s.init_playwright_browsers,
                               ollama_host=s.ollama_host, embed_model=s.embed_model)
+        elapsed_tools = int(time.time() - start_tools)
+        print(f"[openralph] init: tools finished in {elapsed_tools}s")
         for r in results:
             if r.ok:
                 print(f"[green]OK[/green] {r.name} — {r.detail}")
@@ -315,6 +371,7 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
                     print(f"  [yellow]Hint:[/yellow] {r.hint}")
 
     if s.proxy_enabled and s.proxy_auto_start:
+        print("[openralph] init: proxy")
         running, existing_pid = proxy_status(paths.proxy_pid, s.proxy_listen_port)
         if running:
             print(f"[green]OK[/green] proxy — already running (PID {existing_pid})")
@@ -366,7 +423,14 @@ def doctor(repo: str = typer.Argument(".", help="Repo path"),
             if r.hint:
                 print(f"  [yellow]Hint:[/yellow] {r.hint}")
 
-    gi_opts = GitignoreOptions(ignore_reports=True, track_current_feature=True, node_tooling=s.init_node_tooling, playwright=s.init_playwright, ignore_venvs=True)
+    gi_opts = GitignoreOptions(
+        ignore_reports=True,
+        track_current_feature=True,
+        node_tooling=s.init_node_tooling,
+        playwright=s.init_playwright,
+        ignore_venvs=True,
+        report_paths=[s.loop_test_report, s.loop_review_report, s.loop_final_report],
+    )
     if not managed_block_is_current(path, gi_opts):
         all_ok = False
         print("[red]FAIL[/red] gitignore — managed block missing or out of date")
@@ -383,6 +447,8 @@ def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.A
         prd_refresh_every: int | None = typer.Option(None, help="Regenerate PRD every N iterations (0 disables)"),
         prd_refresh_mode: str | None = typer.Option(None, help="PRD refresh mode: '' or 'ask'"),
         prd_qa_mode: str | None = typer.Option(None, help="PRD Q&A mode: interactive|handoff|auto|auto-then-handoff"),
+        human_response: str | None = typer.Option(None, help="Human request handling: stop|auto"),
+        orchestrator: bool | None = typer.Option(None, "--orchestrator/--no-orchestrator", help="Enable orchestrator mode"),
         log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
@@ -394,16 +460,66 @@ def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.A
         s.loop_prd_refresh_mode = prd_refresh_mode
     if prd_qa_mode is not None:
         s.loop_prd_qa_mode = prd_qa_mode
+    if human_response is not None:
+        s.loop_human_response = human_response
+    if orchestrator is not None:
+        s.orchestrator_enabled = orchestrator
     _init_logging_for_repo(path, s)
     log = get_logger("cli")
     iters = s.loop_max_iters if max_iters is None else max_iters
     log.info("Starting run loop with prompt: %s (max_iters=%d)", prompt[:100], iters)
-    run_loop(path, prompt, max_iters=iters, settings=s)
+    halted_for_human = run_loop(path, prompt, max_iters=iters, settings=s)
     log.info("Run loop completed")
     log_file = get_log_file()
     if log_file:
         print(f"[green]Log file[/green] {log_file}")
+    if halted_for_human:
+        print("[yellow]Awaiting human response[/yellow]")
+        print("  See: .ralph/HUMAN_REQUEST.md")
+        print("  To auto-respond next time: pass --human-response auto")
     print("[green]Done[/green]")
+
+
+# ========== Agents Commands ==========
+
+@agents_app.command("plan")
+def agents_plan(repo: str = typer.Argument(".", help="Repo path")):
+    """Run orchestrator to analyze PRD and create feature plan."""
+    path = ensure_repo(repo)
+    s = OpenRalphSettings.load(path)
+    _init_logging_for_repo(path, s)
+    tasks = run_orchestrator(path, s)
+    paths = Paths.for_repo(path)
+    if not tasks:
+        print("[yellow]No tasks generated[/yellow]")
+        return
+    print(f"[green]Wrote[/green] {paths.feature_plan}")
+
+
+@agents_app.command("status")
+def agents_status(repo: str = typer.Argument(".", help="Repo path")):
+    """Show current task status from FEATURE_PLAN.md."""
+    path = ensure_repo(repo)
+    paths = Paths.for_repo(path)
+    if not paths.feature_plan.exists():
+        print("[yellow]No FEATURE_PLAN.md found[/yellow] — run: openralph agents plan")
+        return
+    print(paths.feature_plan.read_text(encoding="utf-8"))
+
+
+@agents_app.command("next")
+def agents_next(repo: str = typer.Argument(".", help="Repo path")):
+    """Show next task to be worked on."""
+    path = ensure_repo(repo)
+    tasks = load_task_status(path)
+    if not tasks:
+        print("[yellow]No tasks found[/yellow] — run: openralph agents plan")
+        return
+    task = select_next_task(tasks)
+    if task is None:
+        print("[yellow]No unblocked tasks available[/yellow]")
+        return
+    print(format_task_brief(task))
 
 
 # ========== PRD Commands ==========

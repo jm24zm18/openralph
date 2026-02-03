@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from openralph.openralph_cli import loop
 
 
@@ -24,3 +26,17 @@ def test_extract_json_from_response() -> None:
         "problem": "X",
     }
     assert loop._extract_json_from_response("not json") is None
+
+
+def test_prompt_path_relative(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = repo / ".ralph" / "FINAL.md"
+    assert loop._prompt_path(repo, path) == ".ralph/FINAL.md"
+
+
+def test_prompt_path_absolute(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = tmp_path / "elsewhere.txt"
+    assert loop._prompt_path(repo, path) == str(path)

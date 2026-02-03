@@ -10,7 +10,21 @@ def _read_template(name: str, fallback: str) -> str:
 
 TEST_POLICY = _read_template(
     "test-policy.md",
-    "# Test policy (template)\n- Prefer project-defined test commands (pyproject/package.json).\n- Fall back to extension-based defaults.\n",
+    "# Test policy\n\n"
+    "## Required actions\n"
+    "1. You MUST execute the test command, not just identify it.\n"
+    "2. Capture and report the full output.\n\n"
+    "## Common test commands\n"
+    "- Node.js: `npm test` or `yarn test`\n"
+    "- Python: `pytest` or `python -m pytest`\n"
+    "- Rust: `cargo test`\n"
+    "- Go: `go test ./...`\n"
+    "- Make: `make test`\n\n"
+    "## Gate decision\n"
+    "- Tests executed and passed -> PASS\n"
+    "- Tests executed and failed -> FAIL\n"
+    "- Test command exists but NOT executed -> FAIL\n"
+    "- No test infrastructure at all -> PASS (with recommendation)\n",
 )
 
 INSTALL_POLICY = _read_template(

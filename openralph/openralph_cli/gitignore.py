@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 MANAGED_START = "# === openralph (managed) ==="
@@ -12,6 +12,7 @@ class GitignoreOptions:
     node_tooling: str = "global"  # global|local
     playwright: bool = True
     ignore_venvs: bool = True
+    report_paths: list[str] = field(default_factory=list)
 
 def render_managed_block(opts: GitignoreOptions) -> str:
     lines: list[str] = []
@@ -30,15 +31,23 @@ def render_managed_block(opts: GitignoreOptions) -> str:
     lines.append(".ralph/memory.sqlite3-wal")
     lines.append(".ralph/memory.sqlite3-shm")
     lines.append(".ralph/proxy.pid")
+    lines.append(".ralph/LAST_GREEN.sha")
     if opts.node_tooling == "local":
         lines.append(".ralph/node-tools/")
     if opts.ignore_reports:
-        lines.append(".ralph/TEST_REPORT.md")
-        lines.append(".ralph/REVIEW_REPORT.md")
-        lines.append(".ralph/FINAL.md")
-        lines.append(".ralph/DONE")
-        lines.append(".ralph/HUMAN_REQUEST.md")
-        lines.append(".ralph/HUMAN_RESPONSE.md")
+        default_reports = [
+            ".ralph/TEST_REPORT.md",
+            ".ralph/REVIEW_REPORT.md",
+            ".ralph/FINAL.md",
+            ".ralph/DONE",
+            ".ralph/HUMAN_REQUEST.md",
+            ".ralph/HUMAN_RESPONSE.md",
+        ]
+        for rp in default_reports:
+            lines.append(rp)
+        for rp in opts.report_paths:
+            if rp and rp not in default_reports:
+                lines.append(rp)
     if opts.ignore_venvs:
         lines.append(".venv/")
         lines.append("venv/")

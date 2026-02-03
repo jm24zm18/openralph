@@ -10,4 +10,4 @@ Major modules:
 - `tooling.py`: check/install pylsp, node servers, Playwright; doctor report
 - `git_manager.py`: branch/checkpoint/rollback helpers
 - `memory/`: sqlite db, index, query, vacuum
-- `loop.py`: orchestration scaffold calling OpenCode with memory context
+- `loop.py`: multi-stage orchestration (builder/test/review), gate parsing, PRD Q&A/refresh, human handoff, DONE handling

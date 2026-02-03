@@ -37,6 +37,25 @@ Init will:
 openralph doctor .
 ```
 
+## Run Loop
+
+```bash
+openralph run . "Implement X"
+```
+
+Key behaviors:
+- Multi-stage loop: builder → test → review each iteration.
+- Gate is determined by `Gate: PASS|FAIL` in `.ralph/TEST_REPORT.md`.
+- Loop stops only when `.ralph/DONE` exists and the gate is PASS.
+- Human handoff: `.ralph/HUMAN_REQUEST.md` + `.ralph/HUMAN_RESPONSE.md`.
+
+PRD Q&A and refresh options:
+```bash
+openralph run . "Implement X" --prd-qa-mode handoff
+openralph run . "Implement X" --prd-qa-mode auto-then-handoff
+openralph run . "Implement X" --prd-refresh-every 5 --prd-refresh-mode ask
+```
+
 ## Gitignore
 
 ```bash

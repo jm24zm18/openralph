@@ -301,6 +301,7 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
 
         # Test stage
         git_ctx = _git_context(repo)
+        test_report_iter = test_report.parent / f"TEST_REPORT.iter-{i}.md"
         test_prompt = (
             "You are the Testing Agent.\n\n"
             "Repo rules:\n"
@@ -320,7 +321,7 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             "Test policy (if present):\n"
             "{test_policy}\n"
         ).format(
-            report_path=_prompt_path(repo, test_report),
+            report_path=_prompt_path(repo, test_report_iter),
             git_ctx=git_ctx,
             test_policy=_read_text(repo / ".ralph" / "test-policy.md", max_chars=4000) or "No test policy found.",
         )
@@ -330,8 +331,12 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         log.debug("Test output written to: %s", test_log)
         if p_test.returncode != 0:
             log.warning("Test stage exited with non-zero return code: %d", p_test.returncode)
-        if not test_report.exists() and (p_test.stdout or "").strip():
+        if test_report_iter.exists():
             test_report.parent.mkdir(parents=True, exist_ok=True)
+            test_report.write_text(test_report_iter.read_text(encoding="utf-8"), encoding="utf-8")
+        elif (p_test.stdout or "").strip():
+            test_report.parent.mkdir(parents=True, exist_ok=True)
+            test_report_iter.write_text(p_test.stdout, encoding="utf-8")
             test_report.write_text(p_test.stdout, encoding="utf-8")
 
         if paths.human_request.exists() and not paths.human_response.exists():
@@ -367,7 +372,9 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         ).format(
             prd=prd_excerpt,
             feature=feature_ctx or "No current feature set.",
-            test_report=_read_text(test_report, max_chars=4000) if test_report.exists() else "No test report found.",
+            test_report=_read_text(test_report_iter, max_chars=4000)
+            if test_report_iter.exists()
+            else "No test report found.",
             git_ctx=git_ctx,
             report_path=_prompt_path(repo, review_report),
         )
@@ -385,7 +392,7 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             log.warning("Review agent requested human input; stopping loop")
             return
 
-        gate_report = _read_text(test_report, max_chars=8000)
+        gate_report = _read_text(test_report_iter, max_chars=8000)
         gate = _parse_gate(gate_report)
         gates_ok = bool(gate)
         log.info("Iteration %d: test gate=%s", i, gate)

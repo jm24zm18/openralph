@@ -7,8 +7,10 @@ from typing import Iterable
 
 from .settings import OpenRalphSettings
 from .paths import Paths
-from .opencode_manager import ensure_opencode
 from .memory import query_memory, index_repo
+from .agent import run_agent, AgentConfig
+from .agent.providers import OpenAIProvider
+from .proxy import ProxyConfig, ProxyServer, proxy_is_listening
 from .git_manager import (
     is_git_repo,
     ensure_branch,
@@ -108,6 +110,85 @@ def _extract_json_from_response(text: str) -> dict[str, str] | None:
     except Exception:
         return None
 
+def _get_provider(settings: OpenRalphSettings) -> OpenAIProvider:
+    """Create an OpenAI-compatible provider using proxy settings."""
+    base_url = f"http://127.0.0.1:{settings.proxy_listen_port}"
+    return OpenAIProvider(
+        base_url=base_url,
+        api_key=settings.proxy_api_key,
+        model=settings.proxy_model_id,
+        timeout=settings.agent_timeout,
+    )
+
+
+def _ensure_proxy(settings: OpenRalphSettings, log) -> None:
+    """Ensure the proxy is running if enabled."""
+    if not settings.proxy_enabled:
+        return
+
+    if proxy_is_listening(settings.proxy_listen_port):
+        log.debug("Proxy already listening on port %d", settings.proxy_listen_port)
+        return
+
+    log.info("Starting proxy on port %d", settings.proxy_listen_port)
+    config = ProxyConfig(
+        listen_port=settings.proxy_listen_port,
+        target_host=settings.proxy_target_host,
+        target_port=settings.proxy_target_port,
+        target_model=settings.proxy_target_model,
+    )
+    server = ProxyServer(config)
+    server.start(daemon=True)
+
+
+def _run_native_agent(
+    prompt: str,
+    repo: Path,
+    settings: OpenRalphSettings,
+    log_file: Path,
+    log,
+    system_prompt: str = "",
+) -> str:
+    """Run the native agent and return its final output."""
+    provider = _get_provider(settings)
+    config = AgentConfig(
+        max_turns=settings.agent_max_turns,
+        system_prompt=system_prompt,
+        timeout_default=settings.agent_timeout,
+        max_output_chars=settings.agent_max_output,
+    )
+
+    output_lines = []
+
+    def on_text(text: str) -> None:
+        output_lines.append(text)
+
+    def on_tool_call(name: str, args: dict) -> None:
+        log.debug("Tool call: %s", name)
+
+    def on_tool_result(name: str, result: str, is_error: bool) -> None:
+        status = "ERROR" if is_error else "OK"
+        log.debug("Tool result [%s]: %s: %s", status, name, result[:100])
+
+    result = run_agent(
+        provider=provider,
+        prompt=prompt,
+        repo=repo,
+        config=config,
+        on_text=on_text,
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+    )
+
+    # Write log
+    log_content = f"Prompt:\n{prompt[:2000]}\n\n---\n\nOutput:\n{result.final_text}\n\n---\n\nTool calls: {result.tool_calls_made}\nCompleted: {result.completed}\n"
+    if result.error:
+        log_content += f"Error: {result.error}\n"
+    log_file.write_text(log_content, encoding="utf-8")
+
+    return result.final_text
+
+
 def _git_context(repo: Path, max_chars: int = 4000) -> str:
     if not is_git_repo(repo):
         return "No git context available."
@@ -164,11 +245,21 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         log.info("Ensuring git branch: %s", branch_name)
         ensure_branch(repo, branch_name)
 
-    oc = ensure_opencode(repo, auto_install=settings.opencode_auto_install, version=settings.opencode_version)
-    log.info("Using OpenCode: %s", oc.path)
-    env = os.environ.copy()
-    env.setdefault("OPENCODE_EXPERIMENTAL", "true")
-    env.setdefault("OPENCODE_EXPERIMENTAL_LSP_TOOL", "true")
+    # Native agent or OpenCode fallback
+    use_native = settings.agent_native
+    oc = None
+    env = None
+
+    if use_native:
+        log.info("Using native agent (proxy port %d)", settings.proxy_listen_port)
+        _ensure_proxy(settings, log)
+    else:
+        from .opencode_manager import ensure_opencode
+        oc = ensure_opencode(repo, auto_install=settings.opencode_auto_install, version=settings.opencode_version)
+        log.info("Using OpenCode: %s", oc.path)
+        env = os.environ.copy()
+        env.setdefault("OPENCODE_EXPERIMENTAL", "true")
+        env.setdefault("OPENCODE_EXPERIMENTAL_LSP_TOOL", "true")
 
     test_report = _resolve_repo_path(repo, settings.loop_test_report, paths.test_report)
     review_report = _resolve_repo_path(repo, settings.loop_review_report, paths.review_report)
@@ -207,16 +298,28 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             generate_prd_from_answers(repo, data, paths.prd)
             _clear_human_exchange(paths.human_request, paths.human_response)
         elif mode == "auto-then-handoff":
-            answers = generate_prd_answers(repo, oc.path)
-            save_prd_answers(repo, answers)
-            generate_prd_from_answers(repo, answers, paths.prd)
-            _write_human_request(paths.human_request, "Please review the generated PRD and list any changes.")
-            log.warning("PRD drafted; awaiting review via HUMAN_REQUEST")
-            return
+            if use_native:
+                log.warning("auto-then-handoff PRD mode not supported with native agent; falling back to handoff")
+                if not paths.human_response.exists():
+                    _write_human_request(paths.human_request, _build_prd_handoff_prompt())
+                    return
+            else:
+                answers = generate_prd_answers(repo, oc.path)
+                save_prd_answers(repo, answers)
+                generate_prd_from_answers(repo, answers, paths.prd)
+                _write_human_request(paths.human_request, "Please review the generated PRD and list any changes.")
+                log.warning("PRD drafted; awaiting review via HUMAN_REQUEST")
+                return
         elif mode == "auto":
-            answers = generate_prd_answers(repo, oc.path)
-            save_prd_answers(repo, answers)
-            generate_prd_from_answers(repo, answers, paths.prd)
+            if use_native:
+                log.warning("auto PRD mode not supported with native agent; falling back to handoff")
+                if not paths.human_response.exists():
+                    _write_human_request(paths.human_request, _build_prd_handoff_prompt())
+                    return
+            else:
+                answers = generate_prd_answers(repo, oc.path)
+                save_prd_answers(repo, answers)
+                generate_prd_from_answers(repo, answers, paths.prd)
         else:
             log.warning("Unknown PRD QA mode: %s", mode)
 
@@ -237,15 +340,17 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
                     return
                 updates = _read_text(paths.human_response, max_chars=20000)
                 _clear_human_exchange(paths.human_request, paths.human_response)
-                try:
-                    generate_prd(repo, paths.prd, oc.path, extra_context=updates)
-                except Exception as e:
-                    log.warning("PRD refresh failed: %s", e, exc_info=True)
+                if not use_native:
+                    try:
+                        generate_prd(repo, paths.prd, oc.path, extra_context=updates)
+                    except Exception as e:
+                        log.warning("PRD refresh failed: %s", e, exc_info=True)
             else:
-                try:
-                    generate_prd(repo, paths.prd, oc.path)
-                except Exception as e:
-                    log.warning("PRD refresh failed: %s", e, exc_info=True)
+                if not use_native:
+                    try:
+                        generate_prd(repo, paths.prd, oc.path)
+                    except Exception as e:
+                        log.warning("PRD refresh failed: %s", e, exc_info=True)
 
         mem = ""
         try:
@@ -289,12 +394,25 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         )
 
         builder_log = paths.logs / f"builder-iter-{i}.log"
-        log.debug("Running OpenCode builder: %s", oc.path)
-        p = subprocess.run([str(oc.path), "run", combined], cwd=str(repo), env=env, text=True, capture_output=True)
-        builder_log.write_text((p.stdout or "") + "\n" + (p.stderr or ""), encoding="utf-8")
+        builder_output = ""
+        if use_native:
+            log.debug("Running native builder agent")
+            builder_output = _run_native_agent(
+                prompt=combined,
+                repo=repo,
+                settings=settings,
+                log_file=builder_log,
+                log=log,
+                system_prompt="You are a code builder agent. Implement the requested changes carefully.",
+            )
+        else:
+            log.debug("Running OpenCode builder: %s", oc.path)
+            p = subprocess.run([str(oc.path), "run", combined], cwd=str(repo), env=env, text=True, capture_output=True)
+            builder_log.write_text((p.stdout or "") + "\n" + (p.stderr or ""), encoding="utf-8")
+            builder_output = p.stdout or ""
+            if p.returncode != 0:
+                log.warning("Builder stage exited with non-zero return code: %d", p.returncode)
         log.debug("Builder output written to: %s", builder_log)
-        if p.returncode != 0:
-            log.warning("Builder stage exited with non-zero return code: %d", p.returncode)
         if paths.human_request.exists() and not paths.human_response.exists():
             log.warning("Builder requested human input; stopping loop")
             return
@@ -326,18 +444,31 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             test_policy=_read_text(repo / ".ralph" / "test-policy.md", max_chars=4000) or "No test policy found.",
         )
         test_log = paths.logs / f"test-iter-{i}.log"
-        p_test = subprocess.run([str(oc.path), "run", test_prompt], cwd=str(repo), env=env, text=True, capture_output=True)
-        test_log.write_text((p_test.stdout or "") + "\n" + (p_test.stderr or ""), encoding="utf-8")
+        test_output = ""
+        if use_native:
+            log.debug("Running native test agent")
+            test_output = _run_native_agent(
+                prompt=test_prompt,
+                repo=repo,
+                settings=settings,
+                log_file=test_log,
+                log=log,
+                system_prompt="You are a testing agent. Run tests and report results.",
+            )
+        else:
+            p_test = subprocess.run([str(oc.path), "run", test_prompt], cwd=str(repo), env=env, text=True, capture_output=True)
+            test_log.write_text((p_test.stdout or "") + "\n" + (p_test.stderr or ""), encoding="utf-8")
+            test_output = p_test.stdout or ""
+            if p_test.returncode != 0:
+                log.warning("Test stage exited with non-zero return code: %d", p_test.returncode)
         log.debug("Test output written to: %s", test_log)
-        if p_test.returncode != 0:
-            log.warning("Test stage exited with non-zero return code: %d", p_test.returncode)
         if test_report_iter.exists():
             test_report.parent.mkdir(parents=True, exist_ok=True)
             test_report.write_text(test_report_iter.read_text(encoding="utf-8"), encoding="utf-8")
-        elif (p_test.stdout or "").strip():
+        elif test_output.strip():
             test_report.parent.mkdir(parents=True, exist_ok=True)
-            test_report_iter.write_text(p_test.stdout, encoding="utf-8")
-            test_report.write_text(p_test.stdout, encoding="utf-8")
+            test_report_iter.write_text(test_output, encoding="utf-8")
+            test_report.write_text(test_output, encoding="utf-8")
 
         if paths.human_request.exists() and not paths.human_response.exists():
             log.warning("Test agent requested human input; stopping loop")
@@ -379,14 +510,27 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             report_path=_prompt_path(repo, review_report),
         )
         review_log = paths.logs / f"review-iter-{i}.log"
-        p_review = subprocess.run([str(oc.path), "run", review_prompt], cwd=str(repo), env=env, text=True, capture_output=True)
-        review_log.write_text((p_review.stdout or "") + "\n" + (p_review.stderr or ""), encoding="utf-8")
+        review_output = ""
+        if use_native:
+            log.debug("Running native review agent")
+            review_output = _run_native_agent(
+                prompt=review_prompt,
+                repo=repo,
+                settings=settings,
+                log_file=review_log,
+                log=log,
+                system_prompt="You are a product review agent. Check alignment with PRD and identify issues.",
+            )
+        else:
+            p_review = subprocess.run([str(oc.path), "run", review_prompt], cwd=str(repo), env=env, text=True, capture_output=True)
+            review_log.write_text((p_review.stdout or "") + "\n" + (p_review.stderr or ""), encoding="utf-8")
+            review_output = p_review.stdout or ""
+            if p_review.returncode != 0:
+                log.warning("Review stage exited with non-zero return code: %d", p_review.returncode)
         log.debug("Review output written to: %s", review_log)
-        if p_review.returncode != 0:
-            log.warning("Review stage exited with non-zero return code: %d", p_review.returncode)
-        if not review_report.exists() and (p_review.stdout or "").strip():
+        if not review_report.exists() and review_output.strip():
             review_report.parent.mkdir(parents=True, exist_ok=True)
-            review_report.write_text(p_review.stdout, encoding="utf-8")
+            review_report.write_text(review_output, encoding="utf-8")
 
         if paths.human_request.exists() and not paths.human_response.exists():
             log.warning("Review agent requested human input; stopping loop")
@@ -415,8 +559,6 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         else:
             gate_fails += 1
             log.warning("Gate failed (count=%d/%d)", gate_fails, settings.loop_max_gate_fails)
-            if p.stderr:
-                log.debug("OpenCode stderr: %s", p.stderr[:500])
             if is_git_repo(repo):
                 diff_path = paths.logs / f"gate-fail-iter-{i}.diff"
                 write_diff_snapshot(repo, diff_path)

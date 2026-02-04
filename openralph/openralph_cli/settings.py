@@ -100,6 +100,12 @@ class OpenRalphSettings:
     proxy_api_key: str = "LOCAL_DGX"
     proxy_auto_start: bool = True
 
+    # Native agent settings (replaces OpenCode)
+    agent_native: bool = True  # Use native agent instead of OpenCode binary
+    agent_max_turns: int = 50  # Max tool call iterations per agent run
+    agent_timeout: int = 120  # Per-tool timeout in seconds
+    agent_max_output: int = 50000  # Max chars per tool output
+
     # Agents - all default to proxy provider/model
     agents_enabled: bool = True
     agents_default_provider: str = ""  # empty = use proxy provider
@@ -187,6 +193,12 @@ class OpenRalphSettings:
         s.proxy_api_key = prx.get("api_key", s.proxy_api_key)
         s.proxy_auto_start = prx.get("auto_start", s.proxy_auto_start)
 
+        agent = merged.get("agent", {})
+        s.agent_native = agent.get("native", s.agent_native)
+        s.agent_max_turns = int(agent.get("max_turns", s.agent_max_turns))
+        s.agent_timeout = int(agent.get("timeout", s.agent_timeout))
+        s.agent_max_output = int(agent.get("max_output", s.agent_max_output))
+
         agents = merged.get("agents", {})
         s.agents_enabled = agents.get("enabled", s.agents_enabled)
         s.agents_default_provider = agents.get("default_provider", s.agents_default_provider) or ""
@@ -259,6 +271,12 @@ class OpenRalphSettings:
                 "api_key": self.proxy_api_key,
                 "auto_start": self.proxy_auto_start,
             },
+            "agent": {
+                "native": self.agent_native,
+                "max_turns": self.agent_max_turns,
+                "timeout": self.agent_timeout,
+                "max_output": self.agent_max_output,
+            },
             "agents": {
                 "enabled": self.agents_enabled,
                 "default_provider": self.agents_default_provider,
@@ -315,17 +333,23 @@ console = false                         # Log to stderr (in addition to Rich out
 file = true                             # Log to .ralph/logs/openralph_*.log
 
 [proxy]
-enabled = false                         # Enable OpenCode proxy server
+enabled = true                          # Enable LLM proxy server
 listen_port = 18889                     # Local port proxy listens on
 target_host = "127.0.0.1"               # Backend LLM host
 target_port = 30000                     # Backend LLM port
 target_model = "openai/gpt-oss-120b"    # Model name to send to backend
-provider_name = "openclaw"              # Provider ID in opencode.json
+provider_name = "openclaw"              # Provider ID
 provider_display = "DGX gpt-OSS"        # Provider display name
-model_id = "chatgpt-oss"                # Model ID in opencode.json
+model_id = "chatgpt-oss"                # Model ID
 model_display = "ChatGPT-OSS 120B"      # Model display name
 api_key = "LOCAL_DGX"                   # API key to use
 auto_start = true                       # Auto-start proxy on init/run
+
+[agent]
+native = true                           # Use native agent (no OpenCode binary)
+max_turns = 50                          # Max tool call iterations per agent run
+timeout = 120                           # Per-tool timeout in seconds
+max_output = 50000                      # Max chars per tool output
 
 [agents]
 enabled = true                          # Enable multi-agent support in opencode.json

@@ -251,14 +251,18 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
     ensure_policies(path)
     init_db(paths.memory_db)
 
-    try:
-        oc = ensure_opencode(path, auto_install=s.opencode_auto_install, version=s.opencode_version)
-        log.info("OpenCode found: %s (%s)", oc.path, oc.source)
-        print(f"[green]OpenCode[/green] {oc.path} ({oc.source})")
-    except Exception as e:
-        log.error("OpenCode install failed: %s", e, exc_info=True)
-        print(f"[red]OpenCode install failed[/red]: {e}")
-        print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
+    if s.agent_native:
+        log.info("Native agent enabled (OpenCode not required)")
+        print(f"[green]Native agent[/green] enabled (proxy port {s.proxy_listen_port})")
+    else:
+        try:
+            oc = ensure_opencode(path, auto_install=s.opencode_auto_install, version=s.opencode_version)
+            log.info("OpenCode found: %s (%s)", oc.path, oc.source)
+            print(f"[green]OpenCode[/green] {oc.path} ({oc.source})")
+        except Exception as e:
+            log.error("OpenCode install failed: %s", e, exc_info=True)
+            print(f"[red]OpenCode install failed[/red]: {e}")
+            print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
 
     if s.init_with_opencode_json:
         proxy_opts = ProxyProviderOptions(
@@ -348,13 +352,16 @@ def doctor(repo: str = typer.Argument(".", help="Repo path"),
     log.info("Running doctor check on: %s", path)
     all_ok = True
 
-    oc = find_opencode(path)
-    if oc:
-        print(f"[green]OK[/green] opencode — {oc.source} ({opencode_version(oc.path)})")
+    if s.agent_native:
+        print(f"[green]OK[/green] agent — native mode (proxy port {s.proxy_listen_port})")
     else:
-        all_ok = False
-        print("[red]FAIL[/red] opencode — not found")
-        print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
+        oc = find_opencode(path)
+        if oc:
+            print(f"[green]OK[/green] opencode — {oc.source} ({opencode_version(oc.path)})")
+        else:
+            all_ok = False
+            print("[red]FAIL[/red] opencode — not found")
+            print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
 
     for r in doctor_report(repo=path, ollama_host=s.ollama_host, embed_model=s.embed_model, vacuum_warn_mb=s.memory_vacuum_warn_mb,
                            proxy_enabled=s.proxy_enabled, proxy_listen_port=s.proxy_listen_port):

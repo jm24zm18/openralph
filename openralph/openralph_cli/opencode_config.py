@@ -18,7 +18,7 @@ class ProxyProviderOptions:
 class AgentConfig:
     name: str
     model: str = ""  # empty = use default
-    permissions: tuple[str, ...] = ("bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search")
+    permissions: tuple[str, ...] = ("bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search", "grep")
 
 @dataclass(frozen=True)
 class AgentsOptions:
@@ -66,6 +66,7 @@ def build_opencode_json(opts: OpenCodeConfigOptions) -> dict:
             "repo_browser": "allow",
             "external_directory": "allow",
             "web_search": "allow",
+            "grep": "allow",
         },
         "lsp": {
             "pylsp": {"command": ["pylsp"], "extensions": [".py", ".pyi"], "env": lsp_env},

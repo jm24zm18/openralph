@@ -66,6 +66,8 @@ class OpenRalphSettings:
     loop_test_report: str = ".ralph/TEST_REPORT.md"
     loop_review_report: str = ".ralph/REVIEW_REPORT.md"
     loop_final_report: str = ".ralph/FINAL.md"
+    prd_agent_enabled: bool = True
+    prd_agent_timeout: int = 900
 
     # Orchestrator
     orchestrator_enabled: bool = True  # Auto-enable when PRD exists
@@ -102,9 +104,11 @@ class OpenRalphSettings:
     log_level: str = "INFO"
     log_console: bool = False  # Don't spam console by default, use Rich output
     log_file: bool = True
+    log_prompts: bool = True
+    log_tool_calls: bool = True
 
     # Proxy
-    proxy_enabled: bool = False
+    proxy_enabled: bool = True
     proxy_listen_port: int = 18889
     proxy_target_host: str = "127.0.0.1"
     proxy_target_port: int = 30000
@@ -126,10 +130,10 @@ class OpenRalphSettings:
     agent_test_model: str = ""
     agent_review_model: str = ""
     # Per-agent permissions
-    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search"])
-    agent_plan_permissions: list[str] = field(default_factory=lambda: ["skill", "question", "repo_browser", "external_directory"])
-    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "skill", "lsp", "question", "repo_browser", "external_directory"])
-    agent_review_permissions: list[str] = field(default_factory=lambda: ["skill", "question", "repo_browser", "external_directory"])
+    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search", "grep"])
+    agent_plan_permissions: list[str] = field(default_factory=lambda: ["skill", "question", "repo_browser", "external_directory", "grep"])
+    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "skill", "lsp", "question", "repo_browser", "external_directory", "grep"])
+    agent_review_permissions: list[str] = field(default_factory=lambda: ["skill", "question", "repo_browser", "external_directory", "grep"])
 
     @staticmethod
     def load(repo: Path) -> "OpenRalphSettings":
@@ -176,6 +180,8 @@ class OpenRalphSettings:
         s.loop_test_report = loop.get("test_report", s.loop_test_report)
         s.loop_review_report = loop.get("review_report", s.loop_review_report)
         s.loop_final_report = loop.get("final_report", s.loop_final_report)
+        s.prd_agent_enabled = bool(loop.get("prd_agent_enabled", s.prd_agent_enabled))
+        s.prd_agent_timeout = int(loop.get("prd_agent_timeout", s.prd_agent_timeout))
 
         orch = merged.get("orchestrator", {})
         enabled = orch.get("enabled")
@@ -219,12 +225,14 @@ class OpenRalphSettings:
             raise ValueError("memory.chunk_overlap must be less than memory.chunk_chars")
         for path, factor in s.memory_path_boosts:
             if factor <= 0:
-                raise ValueError(f\"memory.path_boosts factor must be > 0 (path={path})\")
+                raise ValueError(f"memory.path_boosts factor must be > 0 (path={path})")
 
         log = merged.get("logging", {})
         s.log_level = log.get("level", s.log_level)
         s.log_console = log.get("console", s.log_console)
         s.log_file = log.get("file", s.log_file)
+        s.log_prompts = bool(log.get("prompts", s.log_prompts))
+        s.log_tool_calls = bool(log.get("tool_calls", s.log_tool_calls))
 
         prx = merged.get("proxy", {})
         s.proxy_enabled = prx.get("enabled", s.proxy_enabled)
@@ -284,6 +292,8 @@ class OpenRalphSettings:
                 "test_report": self.loop_test_report,
                 "review_report": self.loop_review_report,
                 "final_report": self.loop_final_report,
+                "prd_agent_enabled": self.prd_agent_enabled,
+                "prd_agent_timeout": self.prd_agent_timeout,
             },
             "orchestrator": {
                 "enabled": self.orchestrator_enabled,
@@ -310,6 +320,8 @@ class OpenRalphSettings:
                 "level": self.log_level,
                 "console": self.log_console,
                 "file": self.log_file,
+                "prompts": self.log_prompts,
+                "tool_calls": self.log_tool_calls,
             },
             "proxy": {
                 "enabled": self.proxy_enabled,
@@ -365,6 +377,8 @@ human_response = "stop"    # stop|auto
 test_report = ".ralph/TEST_REPORT.md"
 review_report = ".ralph/REVIEW_REPORT.md"
 final_report = ".ralph/FINAL.md"
+prd_agent_enabled = true   # Run PRD agent instead of builder for PRD generation
+prd_agent_timeout = 900    # Seconds before PRD agent times out
 
 [orchestrator]
 enabled = true             # Auto-enabled when docs/PRD.md exists
@@ -391,9 +405,11 @@ exclude_names = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"
 level = "INFO"                          # DEBUG, INFO, WARNING, ERROR, CRITICAL
 console = false                         # Log to stderr (in addition to Rich output)
 file = true                             # Log to .ralph/logs/openralph_*.log
+prompts = true                          # Log prompts to .ralph/logs
+tool_calls = true                       # Log tool calls/results to .ralph/logs
 
 [proxy]
-enabled = false                         # Enable OpenCode proxy server
+enabled = true                          # Enable OpenCode proxy server
 listen_port = 18889                     # Local port proxy listens on
 target_host = "127.0.0.1"               # Backend LLM host
 target_port = 30000                     # Backend LLM port
@@ -412,17 +428,17 @@ default_model = ""                      # Default model for all agents (empty = 
 
 [agents.code]
 model = ""                              # Model override for code agent (empty = use default)
-permissions = ["bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search"]
+permissions = ["bash", "edit", "skill", "lsp", "question", "repo_browser", "external_directory", "web_search", "grep"]
 
 [agents.plan]
 model = ""                              # Model override for plan agent (empty = use default)
-permissions = ["skill", "question", "repo_browser", "external_directory"]     # Plan agent: read-only, no edit/bash
+permissions = ["skill", "question", "repo_browser", "external_directory", "grep"]     # Plan agent: read-only, no edit/bash
 
 [agents.test]
 model = ""                              # Model override for test agent (empty = use default)
-permissions = ["bash", "skill", "lsp", "question", "repo_browser", "external_directory"]  # Test agent: can run tests, no edit
+permissions = ["bash", "skill", "lsp", "question", "repo_browser", "external_directory", "grep"]  # Test agent: can run tests, no edit
 
 [agents.review]
 model = ""                              # Model override for review agent (empty = use default)
-permissions = ["skill", "question", "repo_browser", "external_directory"]     # Review agent: read-only analysis
+permissions = ["skill", "question", "repo_browser", "external_directory", "grep"]     # Review agent: read-only analysis
 """

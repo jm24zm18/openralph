@@ -119,6 +119,18 @@ def _coerce_task(raw: dict, idx: int) -> TaskItem:
         blockers=blockers,
     )
 
+def _default_prd_task() -> TaskItem:
+    return TaskItem(
+        id="task-1",
+        type="feature",
+        title="Implement PRD",
+        description="Implement the current docs/PRD.md requirements.",
+        priority=1,
+        status="pending",
+        assigned_to="code",
+        blockers=[],
+    )
+
 
 def _merge_task_status(existing: dict[str, TaskItem], planned: list[TaskItem]) -> list[TaskItem]:
     merged: list[TaskItem] = []
@@ -190,6 +202,12 @@ def _run_opencode(repo: Path, oc_path: Path, prompt: str, env: dict[str, str]) -
         raise RuntimeError(result.stderr or f"OpenCode failed (rc={result.returncode})")
     return result.stdout or ""
 
+def _render_template(template: str, values: dict[str, str]) -> str:
+    rendered = template
+    for key, val in values.items():
+        rendered = rendered.replace("{" + key + "}", val)
+    return rendered
+
 
 def run_orchestrator(repo: Path, settings: OpenRalphSettings, *, oc_path: Path | None = None) -> list[TaskItem]:
     log = get_logger("orchestrator")
@@ -204,19 +222,24 @@ def run_orchestrator(repo: Path, settings: OpenRalphSettings, *, oc_path: Path |
 
     template = _read_template(
         "orchestrator-prompt.md",
-        """You are the Feature Orchestrator Agent.\n\n"
-        "PRD: {prd_content}\n\n"
-        "Recent Test Report: {test_report}\n\n"
-        "Recent Logs: {log_summary}\n\n"
-        "Current Feature Plan: {current_plan}\n\n"
-        "Output a JSON array of tasks.\n",
+        (
+            "You are the Feature Orchestrator Agent.\n\n"
+            "PRD: {prd_content}\n\n"
+            "Recent Test Report: {test_report}\n\n"
+            "Recent Logs: {log_summary}\n\n"
+            "Current Feature Plan: {current_plan}\n\n"
+            "Output a JSON array of tasks.\n"
+        ),
     )
 
-    prompt = template.format(
-        prd_content=prd_content or "(none)",
-        test_report=test_report or "(none)",
-        log_summary=recent_logs or "(none)",
-        current_plan=current_plan or "(none)",
+    prompt = _render_template(
+        template,
+        {
+            "prd_content": prd_content or "(none)",
+            "test_report": test_report or "(none)",
+            "log_summary": recent_logs or "(none)",
+            "current_plan": current_plan or "(none)",
+        },
     )
 
     env = os.environ.copy()
@@ -236,6 +259,8 @@ def run_orchestrator(repo: Path, settings: OpenRalphSettings, *, oc_path: Path |
     except Exception as e:
         log.warning("Orchestrator failed; falling back to existing plan: %s", e)
         existing_tasks = list(existing.values())
+        if not existing_tasks and paths.prd.exists():
+            existing_tasks = [_default_prd_task()]
         if existing_tasks:
             write_task_status(paths, existing_tasks)
             write_feature_plan(paths, existing_tasks)
@@ -300,6 +325,8 @@ def run_orchestrator_iteration(
         do_replan = True
 
     tasks = run_orchestrator(repo, settings, oc_path=oc_path) if do_replan else _load_task_status(paths)
+    if not tasks and not do_replan:
+        tasks = run_orchestrator(repo, settings, oc_path=oc_path)
     if not tasks:
         return None
 

@@ -29,6 +29,7 @@ from .logging import get_logger
 from .features import get_feature_context, get_current_feature
 from .orchestrator import run_orchestrator_iteration, build_task_prompt, mark_task_status
 from .proxy import proxy_status, proxy_is_listening
+from .proxy import ProxyConfig, start_proxy_background
 from .prd import (
     PRD_QA_QUESTIONS,
     generate_prd,
@@ -202,6 +203,15 @@ def _externalize_prompt(repo: Path, prompt: str, *, limit: int = 80000) -> str:
         "3) Then provide the final response.\n"
     )
 
+def _write_log_artifact(logs_dir: Path, name: str, content: str) -> None:
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.time_ns()
+        path = logs_dir / f"{name}-{stamp}.txt"
+        path.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
 def _clear_human_exchange(request_path: Path, response_path: Path) -> None:
     if request_path.exists():
         request_path.unlink()
@@ -265,7 +275,7 @@ def _parse_repo_browser_call(output: str) -> tuple[str, dict] | None:
     text = output
     m = re.search(r"to=repo_browser\.(\w+)", text)
     if not m:
-        m = re.search(r"\bto=(print_tree|glob|read|open_file|write|edit|search|list_dir|stat)\b", text)
+        m = re.search(r"\bto=(print_tree|glob|read|open_file|write|edit|search|list_dir|stat|grep)\b", text)
     if not m:
         m = re.search(r"to=functions\.(\w+)", text)
     if not m:
@@ -326,6 +336,43 @@ def _repo_browser_glob(repo: Path, payload: dict) -> str:
         return "\n".join(items[:200]) + f"\n... ({len(items) - 200} more)"
     return "\n".join(items)
 
+def _repo_browser_grep(repo: Path, payload: dict) -> str:
+    rel_path = (payload.get("path") or "").strip()
+    pattern = (payload.get("pattern") or payload.get("query") or "").strip()
+    if not pattern:
+        return "[error] Missing pattern for grep"
+    base = repo / rel_path if rel_path else repo
+    results: list[str] = []
+    try:
+        regex = re.compile(pattern)
+    except re.error:
+        regex = None
+    try:
+        for path in base.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            for idx, line in enumerate(content.splitlines(), start=1):
+                matched = regex.search(line) if regex else (pattern in line)
+                if matched:
+                    try:
+                        rel = path.relative_to(repo)
+                    except Exception:
+                        rel = path
+                    results.append(f"{rel}:{idx}:{line.strip()}")
+                    if len(results) >= 200:
+                        raise StopIteration
+    except StopIteration:
+        pass
+    except Exception:
+        pass
+    if not results:
+        return "No matches."
+    return "\n".join(results)
+
 def _repo_browser_read(repo: Path, payload: dict) -> str:
     rel_path = (payload.get("path") or payload.get("filePath") or "").strip()
     line_start = int(payload.get("line_start") or 1)
@@ -360,6 +407,8 @@ def _execute_repo_browser_tool(repo: Path, tool: str, payload: dict, settings: O
             result = f"[error] Unable to stat: {rel_path}"
     elif tool == "glob":
         result = _repo_browser_glob(repo, payload)
+    elif tool == "grep":
+        result = _repo_browser_grep(repo, payload)
     elif tool in {"read", "open_file"}:
         result = _repo_browser_read(repo, payload)
     elif tool == "write":
@@ -487,6 +536,8 @@ def _run_opencode_with_repo_browser_shim(
     label: str = "stage",
 ) -> tuple[str, str, int]:
     base_prompt = prompt
+    if settings.log_prompts:
+        _write_log_artifact(Paths.for_repo(repo).logs, f"{label}-prompt", prompt)
     tool_result_paths: list[str] = []
     last_stdout = ""
     last_stderr = ""
@@ -519,6 +570,12 @@ def _run_opencode_with_repo_browser_shim(
         if call is None:
             break
         tool, payload = call
+        if settings.log_tool_calls:
+            _write_log_artifact(
+                Paths.for_repo(repo).logs,
+                f"{label}-tool-call",
+                f"tool={tool}\npayload={json.dumps(payload, indent=2)}\n",
+            )
         if tool in {"read", "open_file"}:
             injected = _tool_result_content(repo, payload)
             if injected is not None:
@@ -544,6 +601,12 @@ def _run_opencode_with_repo_browser_shim(
                 print(f"[openralph] {label} (injected) finished in {elapsed}s (rc={p.returncode})")
                 return (p.stdout or ""), (p.stderr or ""), p.returncode
         result = _execute_repo_browser_tool(repo, tool, payload, settings)
+        if settings.log_tool_calls:
+            _write_log_artifact(
+                Paths.for_repo(repo).logs,
+                f"{label}-tool-result",
+                _cap_tool_result(result, limit=50000),
+            )
         result_path = _write_tool_result_file(repo, f"repo_browser-{tool}", result)
         tool_result_paths.append(str(result_path.relative_to(repo)))
         paths_list = "\n".join(f"- {p}" for p in tool_result_paths[-3:])
@@ -641,6 +704,18 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             settings.proxy_target_model,
             settings.proxy_provider_name,
         )
+        if settings.proxy_auto_start and not running and not listening:
+            try:
+                config = ProxyConfig(
+                    listen_port=settings.proxy_listen_port,
+                    target_host=settings.proxy_target_host,
+                    target_port=settings.proxy_target_port,
+                    target_model=settings.proxy_target_model,
+                )
+                started_pid = start_proxy_background(config, paths.proxy_pid, paths.proxy_log)
+                log.info("Auto-started proxy (PID %s) on port %s", started_pid, settings.proxy_listen_port)
+            except Exception as e:
+                log.warning("Failed to auto-start proxy: %s", e)
 
     test_report = _resolve_repo_path(repo, settings.loop_test_report, paths.test_report)
     review_report = _resolve_repo_path(repo, settings.loop_review_report, paths.review_report)
@@ -678,6 +753,12 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
                 paths.done_marker.unlink()
             except Exception:
                 pass
+
+    # If user is explicitly requesting PRD generation, run PRD agent and stop.
+    if settings.prd_agent_enabled and "generate prd" in prompt.lower():
+        log.info("PRD generation request detected; running PRD agent and stopping")
+        generate_prd(repo, paths.prd, oc.path, extra_context=prompt, timeout=settings.prd_agent_timeout)
+        return False
 
     # Ensure PRD exists before loop
     if not paths.prd.exists():
@@ -720,6 +801,10 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         else:
             log.warning("Unknown PRD QA mode: %s", mode)
     if paths.prd.exists() and "generate prd" in prompt.lower():
+        if settings.prd_agent_enabled:
+            log.info("PRD generation request detected; running PRD agent and stopping")
+            generate_prd(repo, paths.prd, oc.path, extra_context=prompt)
+            return False
         prompt = f"Implement the entire PRD in {_prompt_path(repo, paths.prd)}"
         log.info("PRD present; switching to implementation prompt: %s", prompt)
 
@@ -846,15 +931,18 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             "- If a PRD exists, implement it in code (not just edits to PRD).",
             "- If you need a decision, write to .ralph/HUMAN_REQUEST.md and stop.",
             f"- When complete: write {final_rel} and create .ralph/DONE.",
+            "- If scaffolding is needed (e.g., Vite), use non-interactive commands (e.g., `npm create vite@latest . -- --template vanilla-ts --yes`).",
         ]
         if worklist_needs_work and worklist_text.strip():
             rules.insert(1, "- The worklist is the source of truth; implement it first.")
             rules.insert(2, "- Do not edit docs/PRD.md while worklist is non-empty.")
+        rules.append("- Do not edit docs/PRD.md (PRD agent owns it).")
         combined += "\n\n" + "\n".join(rules)
 
         builder_log = paths.logs / f"builder-iter-{i}.log"
         log.debug("Running OpenCode builder: %s", oc.path)
         print("[openralph] Starting builder stage")
+        prd_before = _read_text(paths.prd, max_chars=200000) if paths.prd.exists() else ""
         before_builder = _snapshot_repo_files(
             repo,
             exclude_dirs={".ralph", ".opencode", ".git"},
@@ -871,6 +959,11 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
             exclude_dirs={".ralph", ".opencode", ".git"},
             exclude_files={"docs/PRD.md"},
         )
+        if paths.prd.exists():
+            prd_after = _read_text(paths.prd, max_chars=200000)
+            if prd_before and prd_after != prd_before:
+                log.warning("Builder modified docs/PRD.md; restoring original content")
+                paths.prd.write_text(prd_before, encoding="utf-8")
         changed_non_prd = _diff_repo_files(before_builder, after_builder)
         if not changed_non_prd:
             strict = (
@@ -1113,6 +1206,8 @@ def run_loop(repo: Path, prompt: str, *, max_iters: int, settings: OpenRalphSett
         else:
             gate_fails += 1
             log.warning("Gate failed (count=%d/%d)", gate_fails, settings.loop_max_gate_fails)
+            if current_task is not None:
+                mark_task_status(repo, current_task.id, "blocked")
             if b_err:
                 log.debug("OpenCode stderr: %s", b_err[:500])
             if is_git_repo(repo):

@@ -158,6 +158,7 @@ def generate_prd(
     output_path: Path | None = None,
     opencode_path: Path | None = None,
     extra_context: str | None = None,
+    timeout: int = 300,
 ) -> Path:
     """Generate a PRD for the repository using OpenCode."""
     if output_path is None:
@@ -182,7 +183,7 @@ def generate_prd(
         cwd=str(repo),
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=timeout,
         env=env,
     )
 
@@ -476,8 +477,18 @@ def _tool_result_content(repo: Path, payload: dict) -> str | None:
     except Exception:
         return None
 
+def _write_log_artifact(logs_dir: Path, name: str, content: str) -> None:
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.time_ns()
+        path = logs_dir / f"{name}-{stamp}.txt"
+        path.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
 def _run_opencode_with_repo_browser_shim(repo: Path, opencode_path: Path, prompt: str, max_shim: int = 2, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     base_prompt = prompt
+    _write_log_artifact(repo / ".ralph" / "logs", "prd-prompt", prompt)
     tool_result_paths: list[str] = []
     last = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     for _ in range(max_shim + 1):
@@ -495,6 +506,11 @@ def _run_opencode_with_repo_browser_shim(repo: Path, opencode_path: Path, prompt
         if call is None:
             break
         tool, payload = call
+        _write_log_artifact(
+            repo / ".ralph" / "logs",
+            "prd-tool-call",
+            f"tool={tool}\npayload={json.dumps(payload, indent=2)}\n",
+        )
         if tool in {"read", "open_file"}:
             injected = _tool_result_content(repo, payload)
             if injected is not None:
@@ -515,6 +531,11 @@ def _run_opencode_with_repo_browser_shim(repo: Path, opencode_path: Path, prompt
                     env=env,
                 )
         result = _execute_repo_browser_tool(repo, tool, payload)
+        _write_log_artifact(
+            repo / ".ralph" / "logs",
+            "prd-tool-result",
+            _cap_tool_result(result),
+        )
         result_path = _write_tool_result_file(repo, f"repo_browser-{tool}", result)
         tool_result_paths.append(str(result_path.relative_to(repo)))
         paths_list = "\n".join(f"- {p}" for p in tool_result_paths[-3:])

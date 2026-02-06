@@ -105,10 +105,8 @@ class OpenAIProvider(LLMProvider):
             tool_calls = []
             for tc in message["tool_calls"]:
                 func = tc.get("function", {})
-                try:
-                    args = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    args = {}
+                raw_args = func.get("arguments", "{}")
+                args = _parse_tool_arguments(raw_args)
 
                 tool_calls.append(ToolCall(
                     id=tc.get("id", ""),
@@ -146,6 +144,19 @@ class OpenAIProvider(LLMProvider):
 
         body = json.dumps(payload).encode("utf-8")
         log.debug("Request to %s: %d bytes", url, len(body))
+        if log.isEnabledFor(logging.DEBUG):
+            # Log messages summary: role, content length, tool calls
+            for i, m in enumerate(payload.get("messages", [])):
+                role = m.get("role", "?")
+                content = m.get("content") or ""
+                tc = m.get("tool_calls")
+                tc_info = f", tool_calls={len(tc)}" if tc else ""
+                log.debug("  msg[%d] role=%s len=%d%s", i, role, len(content), tc_info)
+                # Log full content for short messages, truncated for long
+                if content and len(content) <= 2000:
+                    log.debug("  msg[%d] content: %s", i, content)
+                elif content:
+                    log.debug("  msg[%d] content (truncated): %s ...", i, content[:2000])
 
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
 
@@ -154,6 +165,7 @@ class OpenAIProvider(LLMProvider):
                 response_body = resp.read().decode("utf-8")
                 data = json.loads(response_body)
                 log.debug("Response: %d bytes", len(response_body))
+                log.debug("Response body: %s", response_body[:4000])
                 return self._parse_response(data)
 
         except urllib.error.HTTPError as e:
@@ -189,3 +201,32 @@ class OpenAIProvider(LLMProvider):
                 yield StreamChunk(tool_call=tc)
 
         yield StreamChunk(done=True)
+
+
+def _parse_tool_arguments(raw_args: object) -> dict:
+    if isinstance(raw_args, dict):
+        return raw_args
+    if not isinstance(raw_args, str):
+        return {"_raw": raw_args}
+
+    try:
+        return json.loads(raw_args)
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        import ast
+        parsed = ast.literal_eval(raw_args)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    cleaned = raw_args.strip().strip("`")
+    if cleaned and cleaned != raw_args:
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+    return {"_raw": raw_args}

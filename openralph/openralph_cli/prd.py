@@ -1,11 +1,12 @@
 from __future__ import annotations
 import json
-import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from .opencode_manager import find_opencode
+from .agent import run_agent, AgentConfig
+from .agent.providers import OpenAIProvider
+from .settings import OpenRalphSettings
 
 
 @dataclass
@@ -47,8 +48,6 @@ CONTEXT_FILES = [
     ("requirements.txt", "REQUIREMENTS"),
     ("setup.py", "SETUP_PY"),
     ("Makefile", "MAKEFILE"),
-    ("opencode.json", "OPENCODE_CONFIG"),
-    ("opencode.jsonc", "OPENCODE_CONFIG"),
     (".github/workflows/ci.yml", "CI_WORKFLOW"),
     (".github/workflows/ci.yaml", "CI_WORKFLOW"),
 ]
@@ -153,71 +152,98 @@ REPOSITORY CONTEXT:
 def generate_prd(
     repo: Path,
     output_path: Path | None = None,
-    opencode_path: Path | None = None,
     extra_context: str | None = None,
 ) -> Path:
-    """Generate a PRD for the repository using OpenCode."""
+    """Generate a PRD for the repository using the native agent."""
     if output_path is None:
         output_path = repo / "docs" / "PRD.md"
-
-    if opencode_path is None:
-        result = find_opencode(repo)
-        if result is None:
-            raise RuntimeError("OpenCode not found. Run: openralph opencode install")
-        opencode_path = result.path
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     ctx = _collect_context(repo)
     prompt = _build_prompt(ctx, extra_context=extra_context)
-
-    # Run OpenCode
-    result = subprocess.run(
-        [str(opencode_path), "run", prompt],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        timeout=300,
+    settings = OpenRalphSettings.load(repo)
+    provider = _get_provider(settings)
+    result = run_agent(
+        provider=provider,
+        prompt=prompt,
+        repo=repo,
+        config=AgentConfig(
+            max_turns=settings.agent_max_turns,
+            timeout_default=settings.agent_timeout,
+            max_output_chars=settings.agent_max_output,
+        ),
     )
-
-    if result.returncode != 0:
-        raise RuntimeError(f"OpenCode failed: {result.stderr}")
-
-    # Write output
-    output_path.write_text(result.stdout, encoding="utf-8")
+    output = (result.final_text or "").strip()
+    if not output:
+        raise RuntimeError("PRD generation returned empty output")
+    output_path.write_text(output, encoding="utf-8")
     return output_path
 
-def generate_prd_answers(repo: Path, opencode_path: Path | None = None) -> dict[str, str]:
-    """Generate PRD Q&A answers using OpenCode."""
-    if opencode_path is None:
-        result = find_opencode(repo)
-        if result is None:
-            raise RuntimeError("OpenCode not found. Run: openralph opencode install")
-        opencode_path = result.path
+def generate_prd_answers(repo: Path, user_prompt: str = "") -> dict[str, str]:
+    """Generate PRD Q&A answers using the native agent."""
+    prompt = build_prd_answers_prompt(repo, user_prompt=user_prompt)
+    settings = OpenRalphSettings.load(repo)
+    provider = _get_provider(settings)
+    result = run_agent(
+        provider=provider,
+        prompt=prompt,
+        repo=repo,
+        config=AgentConfig(
+            max_turns=settings.agent_max_turns,
+            system_prompt=(
+                "You are a product manager. You may use tools if helpful, but your final response "
+                "MUST be a single JSON object answering all questions. No markdown."
+            ),
+            timeout_default=settings.agent_timeout,
+            max_output_chars=settings.agent_max_output,
+        ),
+    )
+    output = (result.final_text or "").strip()
+    data = _extract_json_from_response(output)
+    if not data:
+        raise RuntimeError("Failed to parse PRD answers JSON.")
+    return data
 
+
+def build_prd_answers_prompt(repo: Path, user_prompt: str = "") -> str:
     ctx = _collect_context(repo)
     questions = "\n".join([f"- {k}: {q}" for k, q in PRD_QA_QUESTIONS])
+    user_context = f"\nUser's request:\n{user_prompt}\n" if user_prompt else ""
     prompt = f"""You are drafting PRD Q&A answers for the repository '{ctx.repo_name}'.
-
+{user_context}
 Return a single JSON object with keys matching the question ids.
 Do not include extra commentary or markdown.
+Your answers MUST align with the user's request above (especially tech_stack and features).
 
 Questions:
 {questions}
 """
-    result = subprocess.run(
-        [str(opencode_path), "run", prompt],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        timeout=300,
+    return prompt
+
+
+def _get_provider(settings: OpenRalphSettings) -> OpenAIProvider:
+    base_url = f"http://127.0.0.1:{settings.proxy_listen_port}"
+    return OpenAIProvider(
+        base_url=base_url,
+        api_key=settings.proxy_api_key,
+        model=settings.proxy_model_id,
+        timeout=settings.agent_timeout,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"OpenCode failed: {result.stderr}")
+
+
+def _extract_json_from_response(text: str) -> dict[str, str] | None:
     try:
-        return json.loads(result.stdout)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse PRD answers JSON: {e}") from e
+        return json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                return None
+        return None
 
 
 PRD_QA_QUESTIONS = [

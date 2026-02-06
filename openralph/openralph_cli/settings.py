@@ -40,15 +40,7 @@ class OpenRalphSettings:
     ollama_host: str = "http://localhost:11434"
     embed_model: str = "nomic-embed-text"
 
-    # OpenCode bundling
-    opencode_auto_install: bool = True
-    opencode_version: str = ""  # empty = latest
-
     # Init
-    init_with_opencode_json: bool = True
-    init_force_opencode_json: bool = False
-    init_write_skills: bool = True
-    init_force_skills: bool = False
     init_install_tools: bool = True
     init_node_tooling: str = "global"  # global|local
     init_create_venv: bool = False
@@ -65,6 +57,9 @@ class OpenRalphSettings:
     loop_test_report: str = ".ralph/TEST_REPORT.md"
     loop_review_report: str = ".ralph/REVIEW_REPORT.md"
     loop_final_report: str = ".ralph/FINAL.md"
+    loop_auto_mode: str = ""  # "" (off) | "full" (PRD+plan+build all features)
+    loop_max_feature_iters: int = 5  # Max iterations per feature when auto_mode=full
+    loop_retry_failed: bool = True  # Retry failed features on re-run
 
     # Memory
     memory_k: int = 8
@@ -100,8 +95,8 @@ class OpenRalphSettings:
     proxy_api_key: str = "LOCAL_DGX"
     proxy_auto_start: bool = True
 
-    # Native agent settings (replaces OpenCode)
-    agent_native: bool = True  # Use native agent instead of OpenCode binary
+    # Native agent settings
+    agent_native: bool = True  # Must remain true; OpenCode support removed
     agent_max_turns: int = 50  # Max tool call iterations per agent run
     agent_timeout: int = 120  # Per-tool timeout in seconds
     agent_max_output: int = 50000  # Max chars per tool output
@@ -140,15 +135,7 @@ class OpenRalphSettings:
         s.ollama_host = oll.get("host", s.ollama_host)
         s.embed_model = oll.get("embed_model", s.embed_model)
 
-        oc = merged.get("opencode", {})
-        s.opencode_auto_install = oc.get("auto_install", s.opencode_auto_install)
-        s.opencode_version = oc.get("version", s.opencode_version) or ""
-
         ini = merged.get("init", {})
-        s.init_with_opencode_json = ini.get("with_opencode_json", s.init_with_opencode_json)
-        s.init_force_opencode_json = ini.get("force_opencode_json", s.init_force_opencode_json)
-        s.init_write_skills = ini.get("write_skills", s.init_write_skills)
-        s.init_force_skills = ini.get("force_skills", s.init_force_skills)
         s.init_install_tools = ini.get("install_tools", s.init_install_tools)
         s.init_node_tooling = ini.get("node_tooling", s.init_node_tooling)
         s.init_create_venv = ini.get("create_venv", s.init_create_venv)
@@ -165,6 +152,9 @@ class OpenRalphSettings:
         s.loop_test_report = loop.get("test_report", s.loop_test_report)
         s.loop_review_report = loop.get("review_report", s.loop_review_report)
         s.loop_final_report = loop.get("final_report", s.loop_final_report)
+        s.loop_auto_mode = loop.get("auto_mode", s.loop_auto_mode) or ""
+        s.loop_max_feature_iters = int(loop.get("max_feature_iters", s.loop_max_feature_iters))
+        s.loop_retry_failed = loop.get("retry_failed", s.loop_retry_failed)
 
         mem = merged.get("memory", {})
         s.memory_k = mem.get("k", s.memory_k)
@@ -221,12 +211,7 @@ class OpenRalphSettings:
     def as_dict(self) -> dict:
         return {
             "ollama": {"host": self.ollama_host, "embed_model": self.embed_model},
-            "opencode": {"auto_install": self.opencode_auto_install, "version": self.opencode_version},
             "init": {
-                "with_opencode_json": self.init_with_opencode_json,
-                "force_opencode_json": self.init_force_opencode_json,
-                "write_skills": self.init_write_skills,
-                "force_skills": self.init_force_skills,
                 "install_tools": self.init_install_tools,
                 "node_tooling": self.init_node_tooling,
                 "create_venv": self.init_create_venv,
@@ -243,6 +228,9 @@ class OpenRalphSettings:
                 "test_report": self.loop_test_report,
                 "review_report": self.loop_review_report,
                 "final_report": self.loop_final_report,
+                "auto_mode": self.loop_auto_mode,
+                "max_feature_iters": self.loop_max_feature_iters,
+                "retry_failed": self.loop_retry_failed,
             },
             "memory": {
                 "k": self.memory_k,
@@ -292,15 +280,7 @@ STARTER_TOML = """[ollama]
 host = "http://localhost:11434"
 embed_model = "nomic-embed-text"
 
-[opencode]
-auto_install = true
-version = ""            # empty = latest
-
 [init]
-with_opencode_json = true
-force_opencode_json = false
-write_skills = true
-force_skills = false
 install_tools = true
 node_tooling = "local"
 create_venv = false
@@ -317,6 +297,9 @@ prd_qa_mode = "handoff"    # interactive|handoff|auto|auto-then-handoff
 test_report = ".ralph/TEST_REPORT.md"
 review_report = ".ralph/REVIEW_REPORT.md"
 final_report = ".ralph/FINAL.md"
+auto_mode = ""                         # "" (off) or "full" (PRD + plan + build all features)
+max_feature_iters = 5                  # Max iterations per feature when auto_mode = "full"
+retry_failed = true                    # Retry failed features on re-run
 
 [memory]
 k = 8
@@ -346,13 +329,13 @@ api_key = "LOCAL_DGX"                   # API key to use
 auto_start = true                       # Auto-start proxy on init/run
 
 [agent]
-native = true                           # Use native agent (no OpenCode binary)
+native = true                           # Use native agent (OpenCode removed)
 max_turns = 50                          # Max tool call iterations per agent run
 timeout = 120                           # Per-tool timeout in seconds
 max_output = 50000                      # Max chars per tool output
 
 [agents]
-enabled = true                          # Enable multi-agent support in opencode.json
+enabled = true                          # Enable multi-agent support
 default_provider = ""                   # Default provider for all agents (empty = use proxy provider)
 default_model = ""                      # Default model for all agents (empty = use proxy model)
 

@@ -26,10 +26,8 @@ openralph init . --node-tooling local --create-venv
 Init will:
 - create `.ralph/` runtime folder
 - initialize memory DB
-- create `opencode.json`
-- create `.opencode/skills/...`
 - sync `.gitignore` managed block
-- install bundled OpenCode if missing (default)
+- start proxy (if enabled and auto-start is true)
 
 ## Doctor
 
@@ -52,10 +50,10 @@ openralph memory query . "how do we run tests?"
 openralph memory vacuum .
 ```
 
-## OpenCode
+## Proxy
 
 ```bash
-openralph opencode where .
-openralph opencode install .
-openralph opencode version .
+openralph proxy status .
+openralph proxy start .
+openralph proxy stop .
 ```

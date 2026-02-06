@@ -42,63 +42,79 @@ def _extract_reasoning(content: str) -> tuple[str | None, str]:
 
 def _clean_sglang_tags(content: str) -> str:
     content = re.sub(r"<\|start\|>assistant<\|channel\|>", "", content)
-    content = re.sub(r"<\|[^|>]+\|>", "", content)
-    return content
+    # Strip multi-word tag sequences like <|channel|>analysis or <|end|><|call|>
+    content = re.sub(r"(<\|[^|>]+\|>)+", "", content)
+    return content.strip()
 
 
 def _extract_tool_calls(content: str) -> tuple[list[dict], str | None]:
     tool_calls: list[dict] = []
-    tool_pattern = re.compile(
-        r"(?:commentary|analysis|assistantcommentary|analysiscommentary|assistant|final)?\s*"
-        r"to=(?:functions\.)?(\w+)\s*(?:json|code)?\s*\{",
-        re.IGNORECASE,
-    )
+
+    # Primary pattern: handles optional prefix words before to=functions.name
+    # Also tolerates residual SGLang tags between function name and JSON brace
+    tool_patterns = [
+        re.compile(
+            r"(?:commentary|analysis|assistantcommentary|analysiscommentary|assistant|final)?\s*"
+            r"to=(?:functions\.)?(\w+)\s*(?:json|code)?\s*(?:<\|[^|>]+\|>)*\s*\{",
+            re.IGNORECASE,
+        ),
+        # Fallback: bare to=name { without any prefix
+        re.compile(
+            r"to=(?:functions\.)?(\w+)\s*(?:<\|[^|>]+\|>)*\s*\{",
+            re.IGNORECASE,
+        ),
+    ]
 
     first_tool_idx = -1
     text_content = ""
 
-    pos = 0
-    while True:
-        match = tool_pattern.search(content, pos)
-        if not match:
-            break
-
-        if first_tool_idx == -1:
-            first_tool_idx = match.start()
-            text_content = content[:first_tool_idx].strip()
-
-        function_name = match.group(1)
-        start_brace = content.find("{", match.start())
-
-        if start_brace == -1:
-            pos = match.end()
-            continue
-
-        brace_count = 0
-        json_end = -1
-        for i in range(start_brace, len(content)):
-            if content[i] == "{":
-                brace_count += 1
-            elif content[i] == "}":
-                brace_count -= 1
-            if brace_count == 0:
-                json_end = i
+    for pattern in tool_patterns:
+        pos = 0
+        while True:
+            match = pattern.search(content, pos)
+            if not match:
                 break
 
-        if json_end == -1:
-            pos = match.end()
-            continue
+            if first_tool_idx == -1:
+                first_tool_idx = match.start()
+                text_content = content[:first_tool_idx].strip()
 
-        args_str = content[start_brace : json_end + 1]
-        tool_calls.append(
-            {
-                "index": len(tool_calls),
-                "id": _generate_call_id(),
-                "type": "function",
-                "function": {"name": function_name, "arguments": args_str},
-            }
-        )
-        pos = json_end + 1
+            function_name = match.group(1)
+            start_brace = content.find("{", match.start())
+
+            if start_brace == -1:
+                pos = match.end()
+                continue
+
+            brace_count = 0
+            json_end = -1
+            for i in range(start_brace, len(content)):
+                if content[i] == "{":
+                    brace_count += 1
+                elif content[i] == "}":
+                    brace_count -= 1
+                if brace_count == 0:
+                    json_end = i
+                    break
+
+            if json_end == -1:
+                pos = match.end()
+                continue
+
+            args_str = content[start_brace : json_end + 1]
+            tool_calls.append(
+                {
+                    "index": len(tool_calls),
+                    "id": _generate_call_id(),
+                    "type": "function",
+                    "function": {"name": function_name, "arguments": args_str},
+                }
+            )
+            pos = json_end + 1
+
+        # If the first pattern found results, don't try the fallback
+        if tool_calls:
+            break
 
     if tool_calls:
         cleaned_text = re.sub(
@@ -220,7 +236,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     config: ProxyConfig
 
     def log_message(self, format: str, *args: Any) -> None:
-        msg = f"[OpenCode-Proxy] {format % args}"
+        msg = f"[OpenRalph-Proxy] {format % args}"
         print(msg, file=sys.stderr)
 
     def do_GET(self) -> None:
@@ -280,7 +296,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         content_type = response_headers.get("Content-Type", "")
-        if "application/json" in content_type:
+        is_json_ct = "application/json" in content_type
+        if not is_json_ct and response_body.lstrip().startswith("{"):
+            is_json_ct = True
+        if is_json_ct:
             result, is_stream = _transform_response(response_body, original_model, client_wants_stream)
 
             if is_stream:
@@ -322,7 +341,7 @@ class ProxyServer:
         self._server = HTTPServer(("0.0.0.0", self.config.listen_port), handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=daemon)
         self._thread.start()
-        print(f"[OpenCode-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
+        print(f"[OpenRalph-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
 
     def stop(self) -> None:
         if self._server:
@@ -337,7 +356,7 @@ class ProxyServer:
         handler.config = self.config
 
         self._server = HTTPServer(("0.0.0.0", self.config.listen_port), handler)
-        print(f"[OpenCode-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
+        print(f"[OpenRalph-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
         self._server.serve_forever()
 
 

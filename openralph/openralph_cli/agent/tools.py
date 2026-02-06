@@ -86,13 +86,25 @@ TOOLS = [
     },
     {
         "name": "list_dir",
-        "description": "List the contents of a directory. Shows files and subdirectories with type indicators.",
+        "description": "List the contents of a directory. Shows files and subdirectories with type indicators. Use this to explore the project structure.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Directory path (relative to repo root, default: repo root)"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "search",
+        "description": "Search the web for best practices or documentation. Returns a short list of results. Uses DuckDuckGo Instant Answer API.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Max results to return (default 5, max 10)"},
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -116,6 +128,15 @@ def execute_tool(name: str, args: dict, ctx: ToolContext) -> tuple[str, bool]:
     Execute a tool and return (result, is_error).
     """
     try:
+        name, args = _normalize_tool_args(name, args)
+        alias = _resolve_tool_alias(name, args)
+        if alias:
+            name, args = alias
+        name, args = _normalize_tool_args(name, args)
+        error = _validate_tool_args(name, args)
+        if error:
+            return error, True
+
         if name == "bash":
             return _run_bash(args["command"], args.get("timeout"), ctx), False
         elif name == "read_file":
@@ -128,12 +149,168 @@ def execute_tool(name: str, args: dict, ctx: ToolContext) -> tuple[str, bool]:
             return _glob(args["pattern"], args.get("path", "."), ctx), False
         elif name == "grep":
             return _grep(args["pattern"], args.get("path", "."), args.get("include"), ctx), False
-        elif name == "list_dir":
+        elif name == "list_dir" or name == "print_tree":
             return _list_dir(args.get("path", "."), ctx), False
+        elif name == "search":
+            query = args.get("query") or args.get("pattern") or args.get("q", "")
+            return _search_web(query, args.get("max_results"), ctx), False
         else:
-            return f"Unknown tool: {name}", True
+            return _unknown_tool_error(name), True
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}", True
+
+
+def _normalize_tool_args(name: str, args: dict | None) -> tuple[str, dict]:
+    if args is None:
+        args = {}
+    elif not isinstance(args, dict):
+        args = {"value": args}
+    lowered = name.lower()
+
+    if lowered in {"open_file", "openfile"}:
+        name = "read_file"
+
+    if lowered in {"bash", "shell"}:
+        args = _normalize_args(args, {
+            "command": ["cmd", "command_line", "shell", "bash", "run"],
+            "timeout": ["timeout_seconds", "seconds"],
+        })
+        if "command" not in args and "value" in args:
+            args["command"] = str(args["value"])
+
+    if lowered in {"read_file", "open_file", "openfile"}:
+        args = _normalize_args(args, {
+            "path": ["file", "filepath", "filename"],
+            "start_line": ["line_start", "start", "from_line"],
+            "end_line": ["line_end", "end", "to_line"],
+        })
+        if "path" not in args and "value" in args:
+            args["path"] = str(args["value"])
+
+    if lowered == "write_file":
+        args = _normalize_args(args, {
+            "path": ["file", "filepath", "filename"],
+            "content": ["text", "contents", "body", "data"],
+        })
+
+    if lowered == "edit_file":
+        args = _normalize_args(args, {
+            "path": ["file", "filepath", "filename"],
+            "old_text": ["old", "before", "find", "search"],
+            "new_text": ["new", "after", "replace", "replacement"],
+        })
+
+    if lowered == "glob":
+        args = _normalize_args(args, {
+            "pattern": ["glob", "pathspec"],
+            "path": ["base", "dir", "directory"],
+        })
+
+    if lowered == "grep":
+        args = _normalize_args(args, {
+            "pattern": ["regex", "query", "search"],
+            "path": ["file", "filepath", "dir", "directory"],
+            "include": ["glob", "filter"],
+        })
+
+    if lowered in {"list_dir", "print_tree", "ls"}:
+        name = "list_dir"
+        args = _normalize_args(args, {
+            "path": ["dir", "directory"],
+        })
+
+    if lowered == "search":
+        args = _normalize_args(args, {
+            "query": ["q", "pattern", "search"],
+            "max_results": ["limit", "max"],
+        })
+
+    return name, args
+
+
+def _normalize_args(args: dict, mapping: dict[str, list[str]]) -> dict:
+    normalized = dict(args)
+    for canonical, aliases in mapping.items():
+        if canonical in normalized and normalized[canonical] not in (None, ""):
+            continue
+        for alias in aliases:
+            if alias in normalized and normalized[alias] not in (None, ""):
+                normalized[canonical] = normalized[alias]
+                break
+    return normalized
+
+
+def _resolve_tool_alias(name: str, args: dict) -> tuple[str, dict] | None:
+    lowered = name.lower()
+    if lowered == "bashjson":
+        return "bash", args
+    if lowered == "open_file":
+        return "read_file", args
+    if lowered == "mkdir":
+        path = args.get("path") or args.get("dir") or args.get("directory")
+        command = args.get("command")
+        if isinstance(command, str) and command.strip():
+            return "bash", {"command": command.strip()}
+        if isinstance(path, list):
+            path = " ".join(path)
+        if isinstance(path, str) and path.strip():
+            return "bash", {"command": f"mkdir -p {path.strip()}"}
+    return None
+
+
+def _validate_tool_args(name: str, args: dict) -> str | None:
+    tool = next((t for t in TOOLS if t["name"] == name), None)
+    if not tool:
+        return None
+    required = tool.get("input_schema", {}).get("required", [])
+    missing = [k for k in required if k not in args]
+    if missing:
+        schema = tool.get("input_schema", {})
+        examples = _tool_examples(name)
+        provided = ", ".join(sorted(args.keys())) or "(none)"
+        raw = args.get("_raw")
+        raw_hint = f" Raw arguments: {raw!r}." if raw else ""
+        return (
+            f"Error: missing required arguments for tool '{name}': {', '.join(missing)}. "
+            f"Provided keys: {provided}.{raw_hint} Schema: {schema}\n"
+            f"{examples}"
+        )
+    return None
+
+
+def _unknown_tool_error(name: str) -> str:
+    available = ", ".join(t["name"] for t in TOOLS)
+    hint = _tool_alias_hints(name)
+    return (
+        f"Unknown tool: {name}. Available tools: {available}.\n"
+        f"{hint}"
+        "If you need to run a shell command, use tool 'bash' with {\"command\": \"...\"}."
+    )
+
+
+def _tool_alias_hints(name: str) -> str:
+    lowered = name.lower()
+    hints = {
+        "open_file": "Hint: use 'read_file' with {\"path\": \"...\"} and optional start_line/end_line.\n",
+        "mkdir": "Hint: use 'bash' with {\"command\": \"mkdir -p <path>\"}.\n",
+        "bashjson": "Hint: use 'bash' with {\"command\": \"...\"}.\n",
+        "ls": "Hint: use 'list_dir' with optional {\"path\": \"...\"}.\n",
+    }
+    return hints.get(lowered, "")
+
+
+def _tool_examples(name: str) -> str:
+    examples = {
+        "bash": "Example: {\"command\": \"pytest -q\", \"timeout\": 120}",
+        "read_file": "Example: {\"path\": \"README.md\", \"start_line\": 1, \"end_line\": 200}",
+        "write_file": "Example: {\"path\": \"notes.txt\", \"content\": \"Hello\"}",
+        "edit_file": "Example: {\"path\": \"app.py\", \"old_text\": \"foo\", \"new_text\": \"bar\"}",
+        "glob": "Example: {\"pattern\": \"**/*.py\", \"path\": \".\"}",
+        "grep": "Example: {\"pattern\": \"TODO\", \"path\": \".\", \"include\": \"*.py\"}",
+        "list_dir": "Example: {\"path\": \".\"}",
+        "search": "Example: {\"query\": \"pytest fixtures\", \"max_results\": 5}",
+    }
+    return examples.get(name, "")
 
 
 def _resolve_path(path_str: str, ctx: ToolContext) -> Path:
@@ -193,6 +370,67 @@ def _run_bash(command: str, timeout: int | None, ctx: ToolContext) -> str:
         return f"Command timed out after {timeout} seconds"
     except Exception as e:
         return f"Failed to execute command: {e}"
+
+
+def _search_web(query: str, max_results: int | None, ctx: ToolContext) -> str:
+    """Search the web via DuckDuckGo Instant Answer API."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    if not query.strip():
+        return "Error: query is empty"
+
+    limit = max(1, min(int(max_results or 5), 10))
+    params = {
+        "q": query,
+        "format": "json",
+        "no_redirect": "1",
+        "no_html": "1",
+        "skip_disambig": "1",
+    }
+    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode(params)
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "openralph-search/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Error: search request failed ({type(e).__name__}: {e})"
+
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        return f"Error: failed to parse search response ({type(e).__name__}: {e})"
+
+    results: list[str] = []
+
+    abstract = (data.get("AbstractText") or "").strip()
+    if abstract:
+        heading = data.get("Heading") or "Summary"
+        results.append(f"{heading}: {abstract}")
+
+    related = data.get("RelatedTopics") or []
+    for item in related:
+        if len(results) >= limit:
+            break
+        if "Text" in item and "FirstURL" in item:
+            results.append(f"{item['Text']} — {item['FirstURL']}")
+        elif "Topics" in item:
+            for sub in item.get("Topics", []):
+                if len(results) >= limit:
+                    break
+                if "Text" in sub and "FirstURL" in sub:
+                    results.append(f"{sub['Text']} — {sub['FirstURL']}")
+
+    if not results:
+        return "No results found."
+
+    output = "Search results:\n" + "\n".join(f"- {r}" for r in results[:limit])
+    return output[:ctx.max_output_chars]
 
 
 def _read_file(path: str, start_line: int | None, end_line: int | None, ctx: ToolContext) -> str:

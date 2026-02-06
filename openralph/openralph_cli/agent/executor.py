@@ -3,10 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 from dataclasses import dataclass, field
+import json
 import logging
 
 from .providers.base import LLMProvider, Message, ToolResult
-from .tools import TOOLS, ToolContext, execute_tool
+from .tools import (
+    TOOLS,
+    ToolContext,
+    execute_tool,
+    _normalize_tool_args,
+    _resolve_tool_alias,
+    _unknown_tool_error,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +74,8 @@ def run_agent(
     messages: list[Message] = [Message(role="user", content=prompt)]
     tool_calls_made = 0
     last_text = ""
+    tool_cache: dict[str, str] = {}
+    tool_repeat_count: dict[str, int] = {}
 
     log.debug("Starting agent loop: repo=%s, max_turns=%d", repo, config.max_turns)
 
@@ -112,14 +122,35 @@ def run_agent(
         results: list[ToolResult] = []
         for tc in response.tool_calls:
             tool_calls_made += 1
-            log.debug("Executing tool: %s(%s)", tc.name, tc.arguments)
+            cache_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
+            tool_repeat_count[cache_key] = tool_repeat_count.get(cache_key, 0) + 1
+            tool_names = {t["name"] for t in TOOLS}
 
-            if on_tool_call:
-                on_tool_call(tc.name, tc.arguments)
+            if cache_key in tool_cache and tool_repeat_count[cache_key] > 1:
+                result_text = (
+                    f"[Cached — you already called {tc.name} with these arguments. "
+                    f"Previous result:]\n{tool_cache[cache_key]}"
+                )
+                is_error = False
+                log.debug("Returning cached result for repeated tool call: %s", tc.name)
+            else:
+                log.debug("Executing tool: %s(%s)", tc.name, tc.arguments)
 
-            result_text, is_error = execute_tool(tc.name, tc.arguments, ctx)
+                if on_tool_call:
+                    on_tool_call(tc.name, tc.arguments)
 
-            log.debug("Tool result (error=%s): %s", is_error, result_text[:200])
+                norm_name, norm_args = _normalize_tool_args(tc.name, tc.arguments)
+                alias = _resolve_tool_alias(norm_name, norm_args)
+                if norm_name not in tool_names and not alias:
+                    result_text = _unknown_tool_error(norm_name)
+                    is_error = True
+                else:
+                    result_text, is_error = execute_tool(tc.name, tc.arguments, ctx)
+
+                log.debug("Tool result (error=%s): %s", is_error, result_text[:200])
+
+                if not is_error:
+                    tool_cache[cache_key] = result_text
 
             if on_tool_result:
                 on_tool_result(tc.name, result_text, is_error)

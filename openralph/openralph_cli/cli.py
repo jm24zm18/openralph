@@ -10,12 +10,10 @@ from rich import print
 from .repo import ensure_repo
 from .paths import Paths
 from .settings import OpenRalphSettings, global_config_path, repo_config_path, STARTER_TOML
+from .git_manager import is_git_repo
 from .logging import init_logging, LogConfig, get_logger, get_log_file
 from .gitignore import GitignoreOptions, sync_gitignore, managed_block_is_current, render_managed_block
 from .policies import ensure_policies
-from .opencode_manager import ensure_opencode, install_opencode, find_opencode, opencode_version
-from .opencode_config import write_opencode_json, OpenCodeConfigOptions, ProxyProviderOptions, AgentsOptions, AgentConfig
-from .skills_generator import write_default_skills
 from .tooling import ensure_tools, doctor_report, _find_system_python
 from .memory import init_db, index_repo, query_memory, vacuum_db
 from .loop import run_loop
@@ -24,19 +22,17 @@ from .prd import generate_prd, run_prd_qa, generate_prd_from_answers, save_prd_a
 from .features import create_feature, list_features, get_current_feature, set_current_feature, get_feature_context
 from .agents import generate_agents_md, agents_md_exists
 
-app = typer.Typer(help="OpenRalph: orchestrate OpenCode with skills, gates, git, and memory.")
+app = typer.Typer(help="OpenRalph: orchestrate native agents with skills, gates, git, and memory.")
 config_app = typer.Typer(help="Manage openralph configuration.")
 gitignore_app = typer.Typer(help="Manage repo .gitignore (openralph managed block).")
-opencode_app = typer.Typer(help="Manage the bundled OpenCode binary.")
 memory_app = typer.Typer(help="Memory index/query tools (SQLite + Ollama embeddings).")
-proxy_app = typer.Typer(help="Manage the OpenCode API proxy server.")
+proxy_app = typer.Typer(help="Manage the LLM proxy server.")
 prd_app = typer.Typer(help="Generate and manage Product Requirements Documents.")
 feature_app = typer.Typer(help="Manage feature specification folders.")
 agents_app = typer.Typer(help="Manage AGENTS.md and agent coordination.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(gitignore_app, name="gitignore")
-app.add_typer(opencode_app, name="opencode")
 app.add_typer(memory_app, name="memory")
 app.add_typer(proxy_app, name="proxy")
 app.add_typer(prd_app, name="prd")
@@ -96,33 +92,6 @@ def gitignore_sync(repo: str = typer.Argument(".", help="Repo path")):
     opts = GitignoreOptions(ignore_reports=True, track_current_feature=True, node_tooling=s.init_node_tooling, playwright=s.init_playwright, ignore_venvs=True)
     gi = sync_gitignore(path, opts)
     print(f"[green]Synced[/green] {gi}")
-
-@opencode_app.command("install")
-def opencode_install(repo: str = typer.Argument(".", help="Repo path"), version: str = typer.Option("", help="Version like 1.1.48 (empty = latest)")):
-    path = ensure_repo(repo)
-    s = OpenRalphSettings.load(path)
-    v = version or s.opencode_version
-    p = install_opencode(path, version=v)
-    print(f"[green]Installed[/green] {p}")
-    print(f"[green]Version[/green] {opencode_version(p)}")
-
-@opencode_app.command("where")
-def opencode_where(repo: str = typer.Argument(".", help="Repo path")):
-    path = ensure_repo(repo)
-    found = find_opencode(path)
-    if not found:
-        print("[red]Not found[/red] (run: openralph opencode install)")
-        raise typer.Exit(code=1)
-    print(f"{found.path} ({found.source})")
-
-@opencode_app.command("version")
-def opencode_ver(repo: str = typer.Argument(".", help="Repo path")):
-    path = ensure_repo(repo)
-    found = find_opencode(path)
-    if not found:
-        print("[red]Not found[/red] (run: openralph opencode install)")
-        raise typer.Exit(code=1)
-    print(opencode_version(found.path))
 
 @memory_app.command("index")
 def memory_index_cmd(repo: str = typer.Argument(".", help="Repo path")):
@@ -248,47 +217,29 @@ def init(repo: str = typer.Argument(".", help="Repo path or git URL"),
     _init_logging_for_repo(path, s)
     log = get_logger("cli")
     log.info("Initializing repository: %s", path)
+
+    # Auto-init git if not already a git repo
+    if not is_git_repo(path):
+        log.info("Initializing git repository")
+        subprocess.run(["git", "init"], cwd=str(path), capture_output=True, text=True, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=str(path), capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Initial commit (openralph init)", "--allow-empty"],
+            cwd=str(path), capture_output=True, text=True,
+        )
+        print("[green]Initialized[/green] git repository")
+
     ensure_policies(path)
     init_db(paths.memory_db)
 
     if s.agent_native:
-        log.info("Native agent enabled (OpenCode not required)")
+        log.info("Native agent enabled")
         print(f"[green]Native agent[/green] enabled (proxy port {s.proxy_listen_port})")
     else:
-        try:
-            oc = ensure_opencode(path, auto_install=s.opencode_auto_install, version=s.opencode_version)
-            log.info("OpenCode found: %s (%s)", oc.path, oc.source)
-            print(f"[green]OpenCode[/green] {oc.path} ({oc.source})")
-        except Exception as e:
-            log.error("OpenCode install failed: %s", e, exc_info=True)
-            print(f"[red]OpenCode install failed[/red]: {e}")
-            print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
+        log.error("agent.native is false, but OpenCode support has been removed.")
+        print("[red]Config error[/red]: agent.native is false, but OpenCode support has been removed.")
+        raise typer.Exit(code=1)
 
-    if s.init_with_opencode_json:
-        proxy_opts = ProxyProviderOptions(
-            enabled=s.proxy_enabled,
-            listen_port=s.proxy_listen_port,
-            provider_name=s.proxy_provider_name,
-            provider_display=s.proxy_provider_display,
-            model_id=s.proxy_model_id,
-            model_display=s.proxy_model_display,
-            api_key=s.proxy_api_key,
-        )
-        agents_opts = AgentsOptions(
-            enabled=s.agents_enabled,
-            default_provider=s.agents_default_provider,
-            default_model=s.agents_default_model,
-            code=AgentConfig(name="code", model=s.agent_code_model, permissions=tuple(s.agent_code_permissions)),
-            plan=AgentConfig(name="plan", model=s.agent_plan_model, permissions=tuple(s.agent_plan_permissions)),
-            test=AgentConfig(name="test", model=s.agent_test_model, permissions=tuple(s.agent_test_permissions)),
-            review=AgentConfig(name="review", model=s.agent_review_model, permissions=tuple(s.agent_review_permissions)),
-        )
-        ocfg = write_opencode_json(path, force=s.init_force_opencode_json, opts=OpenCodeConfigOptions(node_tooling=node_tooling, proxy=proxy_opts, agents=agents_opts))
-        print(f"[green]Wrote[/green] {ocfg}")
-
-    if s.init_write_skills:
-        write_default_skills(path, force=s.init_force_skills)
-        print("[green]Wrote[/green] .opencode/skills/*")
 
     opts = GitignoreOptions(ignore_reports=True, track_current_feature=True, node_tooling=node_tooling, playwright=s.init_playwright, ignore_venvs=True)
     sync_gitignore(path, opts)
@@ -355,13 +306,9 @@ def doctor(repo: str = typer.Argument(".", help="Repo path"),
     if s.agent_native:
         print(f"[green]OK[/green] agent — native mode (proxy port {s.proxy_listen_port})")
     else:
-        oc = find_opencode(path)
-        if oc:
-            print(f"[green]OK[/green] opencode — {oc.source} ({opencode_version(oc.path)})")
-        else:
-            all_ok = False
-            print("[red]FAIL[/red] opencode — not found")
-            print("  [yellow]Hint:[/yellow] Run: openralph opencode install .")
+        all_ok = False
+        print("[red]FAIL[/red] agent — native mode disabled")
+        print("  [yellow]Hint:[/yellow] Set agent.native = true in config")
 
     for r in doctor_report(repo=path, ollama_host=s.ollama_host, embed_model=s.embed_model, vacuum_warn_mb=s.memory_vacuum_warn_mb,
                            proxy_enabled=s.proxy_enabled, proxy_listen_port=s.proxy_listen_port):
@@ -390,6 +337,7 @@ def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.A
         prd_refresh_every: int | None = typer.Option(None, help="Regenerate PRD every N iterations (0 disables)"),
         prd_refresh_mode: str | None = typer.Option(None, help="PRD refresh mode: '' or 'ask'"),
         prd_qa_mode: str | None = typer.Option(None, help="PRD Q&A mode: interactive|handoff|auto|auto-then-handoff"),
+        auto: str | None = typer.Option(None, "--auto", help="Automation mode: 'full' = PRD + plan + build all features"),
         log_level: str | None = typer.Option(None, help="Log level: DEBUG, INFO, WARNING, ERROR")):
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
@@ -401,10 +349,15 @@ def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.A
         s.loop_prd_refresh_mode = prd_refresh_mode
     if prd_qa_mode is not None:
         s.loop_prd_qa_mode = prd_qa_mode
+    if auto is not None:
+        s.loop_auto_mode = auto
+        # In full auto mode, force PRD auto-generation if no explicit prd_qa_mode given
+        if auto == "full" and prd_qa_mode is None:
+            s.loop_prd_qa_mode = "auto"
     _init_logging_for_repo(path, s)
     log = get_logger("cli")
     iters = s.loop_max_iters if max_iters is None else max_iters
-    log.info("Starting run loop with prompt: %s (max_iters=%d)", prompt[:100], iters)
+    log.info("Starting run loop with prompt: %s (max_iters=%d, auto=%s)", prompt[:100], iters, s.loop_auto_mode or "off")
     run_loop(path, prompt, max_iters=iters, settings=s)
     log.info("Run loop completed")
     log_file = get_log_file()
@@ -421,7 +374,7 @@ def prd_generate_cmd(
     output: str | None = typer.Option(None, help="Output path (default: docs/PRD.md)"),
     force: bool = typer.Option(False, help="Overwrite existing PRD"),
 ):
-    """Generate a PRD from repository context using OpenCode."""
+    """Generate a PRD from repository context using the native agent."""
     path = ensure_repo(repo)
     s = OpenRalphSettings.load(path)
     _init_logging_for_repo(path, s)

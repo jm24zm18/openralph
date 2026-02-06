@@ -285,9 +285,6 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
     ok, detail = _ollama_ok(ollama_host)
     statuses.append(ToolStatus("ollama", ok, detail, hint="Start Ollama or set OLLAMA_HOST"))
 
-    oc_json = repo / "opencode.json"
-    statuses.append(ToolStatus("opencode.json", oc_json.exists(), "present" if oc_json.exists() else "missing", hint="Run openralph init"))
-
     mem = repo / ".ralph" / "memory.sqlite3"
     if mem.exists():
         size_mb = mem.stat().st_size / (1024 * 1024)

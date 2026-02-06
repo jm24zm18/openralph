@@ -19,11 +19,15 @@ class Paths:
     # Coordination files
     human_request: Path
     human_response: Path
+    stack: Path
     test_report: Path
     review_report: Path
     final_report: Path
     done_marker: Path
     last_green: Path
+    # Auto-plan pipeline
+    feature_queue: Path
+    issues: Path
 
     @staticmethod
     def for_repo(repo: Path) -> "Paths":
@@ -46,9 +50,13 @@ class Paths:
             # Coordination files
             human_request=ralph / "HUMAN_REQUEST.md",
             human_response=ralph / "HUMAN_RESPONSE.md",
+            stack=ralph / "STACK.md",
             test_report=ralph / "TEST_REPORT.md",
             review_report=ralph / "REVIEW_REPORT.md",
             final_report=ralph / "FINAL.md",
             done_marker=ralph / "DONE",
             last_green=ralph / "LAST_GREEN.sha",
+            # Auto-plan pipeline
+            feature_queue=ralph / "feature-queue.json",
+            issues=ralph / "issues.json",
         )

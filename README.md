@@ -1,11 +1,8 @@
 # OpenRalph
 
-OpenRalph is a self-contained CLI that orchestrates **OpenCode** for agent-driven repo work, with:
+OpenRalph is a self-contained CLI that orchestrates native agents for repo work, with:
 
-- Bundled **OpenCode** binary per repo (`.ralph/bin/opencode`)
 - Global + repo-local **OpenRalph config** (`.openralph.toml`, `~/.config/openralph/config.toml`)
-- Schema-correct **OpenCode config** (`opencode.json`)
-- OpenCode **skills** under `.opencode/skills/*/SKILL.md`
 - Gitignore managed block (`openralph gitignore sync`)
 - Per-project **memory index** in SQLite using **Ollama** embeddings (e.g. `nomic-embed-text`)
 - Optional tool installs: pylsp, node language servers, Playwright

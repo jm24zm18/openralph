@@ -134,7 +134,7 @@ def index_repo(
         rel = fp.relative_to(root).as_posix()
         try:
             text = fp.read_text(encoding="utf-8", errors="ignore")
-        except Exception as e:
+        except OSError as e:
             log.debug("Failed to read file %s: %s", fp, e)
             continue
 
@@ -164,7 +164,7 @@ def index_repo(
                     emb = ollama_embed(ollama_host, embed_model, c.content)
                     upsert_chunk(con, c, emb, scan_id)
                     chunks_embedded += 1
-                except Exception as e:
+                except (RuntimeError, sqlite3.DatabaseError, OSError, ValueError) as e:
                     log.warning("Failed to embed chunk %s#%d: %s", c.path, c.chunk_index, e)
                     raise
             con.commit()

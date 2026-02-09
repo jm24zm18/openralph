@@ -10,6 +10,14 @@ try:
 except Exception:
     import tomli as tomllib  # type: ignore
 
+
+class ConfigLoadError(RuntimeError):
+    def __init__(self, message: str, *, path: Path | None = None, key_path: str = "") -> None:
+        super().__init__(message)
+        self.path = path
+        self.key_path = key_path
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     out = dict(base)
     for k, v in override.items():
@@ -22,8 +30,174 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def _load_toml(path: Path) -> dict:
     if not path.exists():
         return {}
-    with path.open("rb") as f:
-        return tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception as e:
+        raise ConfigLoadError(f"TOML parse error: {e}", path=path) from e
+    if not isinstance(data, dict):
+        raise ConfigLoadError("Top-level TOML content must be a table/object", path=path)
+    return data
+
+
+def _nested_key_exists(data: dict, keys: tuple[str, ...]) -> bool:
+    cur: object = data
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return False
+        cur = cur[key]
+    return True
+
+
+def _ensure_table(raw: dict, section: str, *, source: Path | None) -> dict:
+    value = raw.get(section, {})
+    if not isinstance(value, dict):
+        raise ConfigLoadError(
+            f"'{section}' must be a table/object",
+            path=source,
+            key_path=section,
+        )
+    return value
+
+
+def _to_int(value: object, *, key_path: str, source: Path | None) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise ConfigLoadError(
+            f"'{key_path}' must be an integer (got {value!r})",
+            path=source,
+            key_path=key_path,
+        ) from e
+
+
+def _to_float(value: object, *, key_path: str, source: Path | None) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as e:
+        raise ConfigLoadError(
+            f"'{key_path}' must be a number (got {value!r})",
+            path=source,
+            key_path=key_path,
+        ) from e
+
+
+def _to_bool(value: object, *, key_path: str, source: Path | None) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ConfigLoadError(
+        f"'{key_path}' must be a boolean (got {value!r})",
+        path=source,
+        key_path=key_path,
+    )
+
+
+def _to_str(value: object, *, key_path: str, source: Path | None) -> str:
+    if isinstance(value, str):
+        return value
+    raise ConfigLoadError(
+        f"'{key_path}' must be a string (got {value!r})",
+        path=source,
+        key_path=key_path,
+    )
+
+
+def _to_str_list(value: object, *, key_path: str, source: Path | None) -> list[str]:
+    if isinstance(value, list):
+        out: list[str] = []
+        for idx, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ConfigLoadError(
+                    f"'{key_path}[{idx}]' must be a string (got {item!r})",
+                    path=source,
+                    key_path=key_path,
+                )
+            out.append(item)
+        return out
+    raise ConfigLoadError(
+        f"'{key_path}' must be a list of strings (got {value!r})",
+        path=source,
+        key_path=key_path,
+    )
+
+
+def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("export "):
+        text = text[7:].strip()
+    if "=" not in text:
+        return None
+    key, value = text.split("=", 1)
+    key = key.strip()
+    if not key:
+        return None
+    value = value.strip()
+    if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1]
+    else:
+        if " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+    return key, value
+
+
+def _load_repo_dotenv(repo: Path) -> None:
+    env_path = repo / ".env"
+    if not env_path.exists() or not env_path.is_file():
+        return
+    try:
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            item = _parse_dotenv_line(line)
+            if not item:
+                continue
+            key, value = item
+            # Keep real environment vars highest priority.
+            os.environ.setdefault(key, value)
+    except Exception:
+        # Best effort only: never block CLI execution on .env parsing.
+        return
+
+
+_TOOL_PERMISSION_ALIASES: dict[str, str] = {
+    "edit": "edit_file",
+    "read": "read_file",
+    "write": "write_file",
+    "search_repo": "repo_search",
+    "ls": "list_dir",
+}
+
+_VALID_AGENT_TOOL_PERMISSIONS = {
+    "bash",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "list_dir",
+    "search",
+    "repo_search",
+}
+
+
+def _normalize_agent_permissions(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for raw in values:
+        name = str(raw).strip()
+        if not name:
+            continue
+        mapped = _TOOL_PERMISSION_ALIASES.get(name, name)
+        if mapped in _VALID_AGENT_TOOL_PERMISSIONS and mapped not in normalized:
+            normalized.append(mapped)
+    return normalized
 
 def global_config_path() -> Path:
     if sys.platform.startswith("win"):
@@ -40,20 +214,13 @@ class OpenRalphSettings:
     ollama_host: str = "http://localhost:11434"
     embed_model: str = "nomic-embed-text"
 
-    # OpenCode bundling
-    opencode_auto_install: bool = True
-    opencode_version: str = ""  # empty = latest
-
     # Init
-    init_with_opencode_json: bool = True
-    init_force_opencode_json: bool = False
-    init_write_skills: bool = True
-    init_force_skills: bool = False
     init_install_tools: bool = True
     init_node_tooling: str = "global"  # global|local
     init_create_venv: bool = False
     init_playwright: bool = True
     init_playwright_browsers: bool = True
+    init_playwright_cli: bool = True
 
     # Loop
     loop_max_iters: int = 10
@@ -65,6 +232,12 @@ class OpenRalphSettings:
     loop_test_report: str = ".ralph/TEST_REPORT.md"
     loop_review_report: str = ".ralph/REVIEW_REPORT.md"
     loop_final_report: str = ".ralph/FINAL.md"
+    loop_auto_mode: str = ""  # "" (off) | "full" (PRD+plan+build all features)
+    loop_max_feature_iters: int = 5  # Max iterations per feature when auto_mode=full
+    loop_retry_failed: bool = True  # Retry failed features on re-run
+    loop_smoke_check: bool = True  # Run runtime smoke checks after gate PASS
+    loop_smoke_timeout: int = 10  # Per-check subprocess timeout in seconds
+    loop_max_tool_errors: int = 0  # Max allowed tool errors before run is downgraded
 
     # Memory
     memory_k: int = 8
@@ -86,6 +259,15 @@ class OpenRalphSettings:
     log_level: str = "INFO"
     log_console: bool = False  # Don't spam console by default, use Rich output
     log_file: bool = True
+    log_raw_debug: bool = True  # Write full untruncated provider/tool payloads to raw logs
+
+    # Sandbox
+    sandbox_enabled: bool = True
+    sandbox_mode: str = "docker"  # docker|local
+    sandbox_docker_image: str = "python:3.12-slim"
+    sandbox_network: str = "bridge"  # bridge|none
+    sandbox_fail_closed: bool = True
+    sandbox_env_allowlist: list[str] = field(default_factory=lambda: ["OLLAMA_HOST", "EMBED_MODEL", "BRAVE_API_KEY"])
 
     # Proxy
     proxy_enabled: bool = False
@@ -99,6 +281,18 @@ class OpenRalphSettings:
     proxy_model_display: str = "ChatGPT-OSS 120B"
     proxy_api_key: str = "LOCAL_DGX"
     proxy_auto_start: bool = True
+    proxy_log_requests: bool = False
+    proxy_cors_enabled: bool = False
+    proxy_cors_allow_origin: str = "*"
+
+    # UI
+    ui_dashboard: bool = True
+
+    # Native agent settings
+    agent_native: bool = True  # Must remain true; OpenCode support removed
+    agent_max_turns: int = 50  # Max tool call iterations per agent run
+    agent_timeout: int = 120  # Per-tool timeout in seconds
+    agent_max_output: int = 50000  # Max chars per tool output
 
     # Agents - all default to proxy provider/model
     agents_enabled: bool = True
@@ -110,18 +304,29 @@ class OpenRalphSettings:
     agent_test_model: str = ""
     agent_review_model: str = ""
     # Per-agent permissions
-    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "edit", "skill", "lsp", "question"])
-    agent_plan_permissions: list[str] = field(default_factory=lambda: ["skill", "question"])
-    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "skill", "lsp", "question"])
-    agent_review_permissions: list[str] = field(default_factory=lambda: ["skill", "question"])
+    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "search"])
+    agent_plan_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"])
+    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"])
+    agent_review_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"])
 
     @staticmethod
     def load(repo: Path) -> "OpenRalphSettings":
         repo = repo.resolve()
+        _load_repo_dotenv(repo)
         s = OpenRalphSettings()
-        g = _load_toml(global_config_path())
-        r = _load_toml(repo_config_path(repo))
+        global_path = global_config_path()
+        repo_path = repo_config_path(repo)
+        g = _load_toml(global_path)
+        r = _load_toml(repo_path)
         merged = _deep_merge(g, r)
+
+        def _source_for(*keys: str) -> Path | None:
+            key_path = tuple(keys)
+            if _nested_key_exists(r, key_path):
+                return repo_path
+            if _nested_key_exists(g, key_path):
+                return global_path
+            return None
 
         if os.environ.get("OLLAMA_HOST"):
             merged.setdefault("ollama", {})
@@ -130,96 +335,112 @@ class OpenRalphSettings:
             merged.setdefault("ollama", {})
             merged["ollama"]["embed_model"] = os.environ["EMBED_MODEL"]
 
-        oll = merged.get("ollama", {})
-        s.ollama_host = oll.get("host", s.ollama_host)
-        s.embed_model = oll.get("embed_model", s.embed_model)
+        oll = _ensure_table(merged, "ollama", source=_source_for("ollama"))
+        s.ollama_host = _to_str(oll.get("host", s.ollama_host), key_path="ollama.host", source=_source_for("ollama", "host"))
+        s.embed_model = _to_str(oll.get("embed_model", s.embed_model), key_path="ollama.embed_model", source=_source_for("ollama", "embed_model"))
 
-        oc = merged.get("opencode", {})
-        s.opencode_auto_install = oc.get("auto_install", s.opencode_auto_install)
-        s.opencode_version = oc.get("version", s.opencode_version) or ""
+        ini = _ensure_table(merged, "init", source=_source_for("init"))
+        s.init_install_tools = _to_bool(ini.get("install_tools", s.init_install_tools), key_path="init.install_tools", source=_source_for("init", "install_tools"))
+        s.init_node_tooling = _to_str(ini.get("node_tooling", s.init_node_tooling), key_path="init.node_tooling", source=_source_for("init", "node_tooling"))
+        s.init_create_venv = _to_bool(ini.get("create_venv", s.init_create_venv), key_path="init.create_venv", source=_source_for("init", "create_venv"))
+        s.init_playwright = _to_bool(ini.get("playwright", s.init_playwright), key_path="init.playwright", source=_source_for("init", "playwright"))
+        s.init_playwright_browsers = _to_bool(ini.get("playwright_browsers", s.init_playwright_browsers), key_path="init.playwright_browsers", source=_source_for("init", "playwright_browsers"))
+        s.init_playwright_cli = _to_bool(ini.get("playwright_cli", s.init_playwright_cli), key_path="init.playwright_cli", source=_source_for("init", "playwright_cli"))
 
-        ini = merged.get("init", {})
-        s.init_with_opencode_json = ini.get("with_opencode_json", s.init_with_opencode_json)
-        s.init_force_opencode_json = ini.get("force_opencode_json", s.init_force_opencode_json)
-        s.init_write_skills = ini.get("write_skills", s.init_write_skills)
-        s.init_force_skills = ini.get("force_skills", s.init_force_skills)
-        s.init_install_tools = ini.get("install_tools", s.init_install_tools)
-        s.init_node_tooling = ini.get("node_tooling", s.init_node_tooling)
-        s.init_create_venv = ini.get("create_venv", s.init_create_venv)
-        s.init_playwright = ini.get("playwright", s.init_playwright)
-        s.init_playwright_browsers = ini.get("playwright_browsers", s.init_playwright_browsers)
+        loop = _ensure_table(merged, "loop", source=_source_for("loop"))
+        s.loop_max_iters = _to_int(loop.get("max_iters", s.loop_max_iters), key_path="loop.max_iters", source=_source_for("loop", "max_iters"))
+        s.loop_rollback_on_gate_fail = _to_bool(loop.get("rollback_on_gate_fail", s.loop_rollback_on_gate_fail), key_path="loop.rollback_on_gate_fail", source=_source_for("loop", "rollback_on_gate_fail"))
+        s.loop_max_gate_fails = _to_int(loop.get("max_gate_fails", s.loop_max_gate_fails), key_path="loop.max_gate_fails", source=_source_for("loop", "max_gate_fails"))
+        s.loop_prd_refresh_every = _to_int(loop.get("prd_refresh_every", s.loop_prd_refresh_every), key_path="loop.prd_refresh_every", source=_source_for("loop", "prd_refresh_every"))
+        s.loop_prd_refresh_mode = _to_str(loop.get("prd_refresh_mode", s.loop_prd_refresh_mode), key_path="loop.prd_refresh_mode", source=_source_for("loop", "prd_refresh_mode")) or ""
+        s.loop_prd_qa_mode = _to_str(loop.get("prd_qa_mode", s.loop_prd_qa_mode), key_path="loop.prd_qa_mode", source=_source_for("loop", "prd_qa_mode")) or s.loop_prd_qa_mode
+        s.loop_test_report = _to_str(loop.get("test_report", s.loop_test_report), key_path="loop.test_report", source=_source_for("loop", "test_report"))
+        s.loop_review_report = _to_str(loop.get("review_report", s.loop_review_report), key_path="loop.review_report", source=_source_for("loop", "review_report"))
+        s.loop_final_report = _to_str(loop.get("final_report", s.loop_final_report), key_path="loop.final_report", source=_source_for("loop", "final_report"))
+        s.loop_auto_mode = _to_str(loop.get("auto_mode", s.loop_auto_mode), key_path="loop.auto_mode", source=_source_for("loop", "auto_mode")) or ""
+        s.loop_max_feature_iters = _to_int(loop.get("max_feature_iters", s.loop_max_feature_iters), key_path="loop.max_feature_iters", source=_source_for("loop", "max_feature_iters"))
+        s.loop_retry_failed = _to_bool(loop.get("retry_failed", s.loop_retry_failed), key_path="loop.retry_failed", source=_source_for("loop", "retry_failed"))
+        s.loop_smoke_check = _to_bool(loop.get("smoke_check", s.loop_smoke_check), key_path="loop.smoke_check", source=_source_for("loop", "smoke_check"))
+        s.loop_smoke_timeout = _to_int(loop.get("smoke_timeout", s.loop_smoke_timeout), key_path="loop.smoke_timeout", source=_source_for("loop", "smoke_timeout"))
+        s.loop_max_tool_errors = _to_int(loop.get("max_tool_errors", s.loop_max_tool_errors), key_path="loop.max_tool_errors", source=_source_for("loop", "max_tool_errors"))
 
-        loop = merged.get("loop", {})
-        s.loop_max_iters = loop.get("max_iters", s.loop_max_iters)
-        s.loop_rollback_on_gate_fail = loop.get("rollback_on_gate_fail", s.loop_rollback_on_gate_fail)
-        s.loop_max_gate_fails = loop.get("max_gate_fails", s.loop_max_gate_fails)
-        s.loop_prd_refresh_every = int(loop.get("prd_refresh_every", s.loop_prd_refresh_every))
-        s.loop_prd_refresh_mode = loop.get("prd_refresh_mode", s.loop_prd_refresh_mode) or ""
-        s.loop_prd_qa_mode = loop.get("prd_qa_mode", s.loop_prd_qa_mode) or s.loop_prd_qa_mode
-        s.loop_test_report = loop.get("test_report", s.loop_test_report)
-        s.loop_review_report = loop.get("review_report", s.loop_review_report)
-        s.loop_final_report = loop.get("final_report", s.loop_final_report)
+        mem = _ensure_table(merged, "memory", source=_source_for("memory"))
+        s.memory_k = _to_int(mem.get("k", s.memory_k), key_path="memory.k", source=_source_for("memory", "k"))
+        s.memory_inject_max_chars = _to_int(mem.get("inject_max_chars", s.memory_inject_max_chars), key_path="memory.inject_max_chars", source=_source_for("memory", "inject_max_chars"))
+        s.memory_chunk_chars = _to_int(mem.get("chunk_chars", s.memory_chunk_chars), key_path="memory.chunk_chars", source=_source_for("memory", "chunk_chars"))
+        s.memory_chunk_overlap = _to_int(mem.get("chunk_overlap", s.memory_chunk_overlap), key_path="memory.chunk_overlap", source=_source_for("memory", "chunk_overlap"))
+        s.memory_vacuum_warn_mb = _to_float(mem.get("vacuum_warn_mb", s.memory_vacuum_warn_mb), key_path="memory.vacuum_warn_mb", source=_source_for("memory", "vacuum_warn_mb"))
+        s.memory_exclude_dirs = _to_str_list(mem.get("exclude_dirs", s.memory_exclude_dirs), key_path="memory.exclude_dirs", source=_source_for("memory", "exclude_dirs"))
+        s.memory_include_exts = _to_str_list(mem.get("include_exts", s.memory_include_exts), key_path="memory.include_exts", source=_source_for("memory", "include_exts"))
 
-        mem = merged.get("memory", {})
-        s.memory_k = mem.get("k", s.memory_k)
-        s.memory_inject_max_chars = int(mem.get("inject_max_chars", s.memory_inject_max_chars))
-        s.memory_chunk_chars = mem.get("chunk_chars", s.memory_chunk_chars)
-        s.memory_chunk_overlap = mem.get("chunk_overlap", s.memory_chunk_overlap)
-        s.memory_vacuum_warn_mb = float(mem.get("vacuum_warn_mb", s.memory_vacuum_warn_mb))
-        s.memory_exclude_dirs = mem.get("exclude_dirs", s.memory_exclude_dirs)
-        s.memory_include_exts = mem.get("include_exts", s.memory_include_exts)
+        ui = _ensure_table(merged, "ui", source=_source_for("ui"))
+        s.ui_dashboard = _to_bool(ui.get("dashboard", s.ui_dashboard), key_path="ui.dashboard", source=_source_for("ui", "dashboard"))
 
-        log = merged.get("logging", {})
-        s.log_level = log.get("level", s.log_level)
-        s.log_console = log.get("console", s.log_console)
-        s.log_file = log.get("file", s.log_file)
+        log = _ensure_table(merged, "logging", source=_source_for("logging"))
+        s.log_level = _to_str(log.get("level", s.log_level), key_path="logging.level", source=_source_for("logging", "level"))
+        s.log_console = _to_bool(log.get("console", s.log_console), key_path="logging.console", source=_source_for("logging", "console"))
+        s.log_file = _to_bool(log.get("file", s.log_file), key_path="logging.file", source=_source_for("logging", "file"))
+        s.log_raw_debug = _to_bool(log.get("raw_debug", s.log_raw_debug), key_path="logging.raw_debug", source=_source_for("logging", "raw_debug"))
 
-        prx = merged.get("proxy", {})
-        s.proxy_enabled = prx.get("enabled", s.proxy_enabled)
-        s.proxy_listen_port = int(prx.get("listen_port", s.proxy_listen_port))
-        s.proxy_target_host = prx.get("target_host", s.proxy_target_host)
-        s.proxy_target_port = int(prx.get("target_port", s.proxy_target_port))
-        s.proxy_target_model = prx.get("target_model", s.proxy_target_model)
-        s.proxy_provider_name = prx.get("provider_name", s.proxy_provider_name)
-        s.proxy_provider_display = prx.get("provider_display", s.proxy_provider_display)
-        s.proxy_model_id = prx.get("model_id", s.proxy_model_id)
-        s.proxy_model_display = prx.get("model_display", s.proxy_model_display)
-        s.proxy_api_key = prx.get("api_key", s.proxy_api_key)
-        s.proxy_auto_start = prx.get("auto_start", s.proxy_auto_start)
+        sandbox = _ensure_table(merged, "sandbox", source=_source_for("sandbox"))
+        s.sandbox_enabled = _to_bool(sandbox.get("enabled", s.sandbox_enabled), key_path="sandbox.enabled", source=_source_for("sandbox", "enabled"))
+        s.sandbox_mode = _to_str(sandbox.get("mode", s.sandbox_mode), key_path="sandbox.mode", source=_source_for("sandbox", "mode")) or s.sandbox_mode
+        s.sandbox_docker_image = _to_str(sandbox.get("docker_image", s.sandbox_docker_image), key_path="sandbox.docker_image", source=_source_for("sandbox", "docker_image")) or s.sandbox_docker_image
+        s.sandbox_network = _to_str(sandbox.get("network", s.sandbox_network), key_path="sandbox.network", source=_source_for("sandbox", "network")) or s.sandbox_network
+        s.sandbox_fail_closed = _to_bool(sandbox.get("fail_closed", s.sandbox_fail_closed), key_path="sandbox.fail_closed", source=_source_for("sandbox", "fail_closed"))
+        s.sandbox_env_allowlist = _to_str_list(sandbox.get("env_allowlist", s.sandbox_env_allowlist), key_path="sandbox.env_allowlist", source=_source_for("sandbox", "env_allowlist"))
 
-        agents = merged.get("agents", {})
-        s.agents_enabled = agents.get("enabled", s.agents_enabled)
-        s.agents_default_provider = agents.get("default_provider", s.agents_default_provider) or ""
-        s.agents_default_model = agents.get("default_model", s.agents_default_model) or ""
+        prx = _ensure_table(merged, "proxy", source=_source_for("proxy"))
+        s.proxy_enabled = _to_bool(prx.get("enabled", s.proxy_enabled), key_path="proxy.enabled", source=_source_for("proxy", "enabled"))
+        s.proxy_listen_port = _to_int(prx.get("listen_port", s.proxy_listen_port), key_path="proxy.listen_port", source=_source_for("proxy", "listen_port"))
+        s.proxy_target_host = _to_str(prx.get("target_host", s.proxy_target_host), key_path="proxy.target_host", source=_source_for("proxy", "target_host"))
+        s.proxy_target_port = _to_int(prx.get("target_port", s.proxy_target_port), key_path="proxy.target_port", source=_source_for("proxy", "target_port"))
+        s.proxy_target_model = _to_str(prx.get("target_model", s.proxy_target_model), key_path="proxy.target_model", source=_source_for("proxy", "target_model"))
+        s.proxy_provider_name = _to_str(prx.get("provider_name", s.proxy_provider_name), key_path="proxy.provider_name", source=_source_for("proxy", "provider_name"))
+        s.proxy_provider_display = _to_str(prx.get("provider_display", s.proxy_provider_display), key_path="proxy.provider_display", source=_source_for("proxy", "provider_display"))
+        s.proxy_model_id = _to_str(prx.get("model_id", s.proxy_model_id), key_path="proxy.model_id", source=_source_for("proxy", "model_id"))
+        s.proxy_model_display = _to_str(prx.get("model_display", s.proxy_model_display), key_path="proxy.model_display", source=_source_for("proxy", "model_display"))
+        s.proxy_api_key = _to_str(prx.get("api_key", s.proxy_api_key), key_path="proxy.api_key", source=_source_for("proxy", "api_key"))
+        s.proxy_auto_start = _to_bool(prx.get("auto_start", s.proxy_auto_start), key_path="proxy.auto_start", source=_source_for("proxy", "auto_start"))
+        s.proxy_log_requests = _to_bool(prx.get("log_requests", s.proxy_log_requests), key_path="proxy.log_requests", source=_source_for("proxy", "log_requests"))
+        s.proxy_cors_enabled = _to_bool(prx.get("cors_enabled", s.proxy_cors_enabled), key_path="proxy.cors_enabled", source=_source_for("proxy", "cors_enabled"))
+        s.proxy_cors_allow_origin = _to_str(prx.get("cors_allow_origin", s.proxy_cors_allow_origin), key_path="proxy.cors_allow_origin", source=_source_for("proxy", "cors_allow_origin"))
+
+        agent = _ensure_table(merged, "agent", source=_source_for("agent"))
+        s.agent_native = _to_bool(agent.get("native", s.agent_native), key_path="agent.native", source=_source_for("agent", "native"))
+        s.agent_max_turns = _to_int(agent.get("max_turns", s.agent_max_turns), key_path="agent.max_turns", source=_source_for("agent", "max_turns"))
+        s.agent_timeout = _to_int(agent.get("timeout", s.agent_timeout), key_path="agent.timeout", source=_source_for("agent", "timeout"))
+        s.agent_max_output = _to_int(agent.get("max_output", s.agent_max_output), key_path="agent.max_output", source=_source_for("agent", "max_output"))
+
+        agents = _ensure_table(merged, "agents", source=_source_for("agents"))
+        s.agents_enabled = _to_bool(agents.get("enabled", s.agents_enabled), key_path="agents.enabled", source=_source_for("agents", "enabled"))
+        s.agents_default_provider = _to_str(agents.get("default_provider", s.agents_default_provider), key_path="agents.default_provider", source=_source_for("agents", "default_provider")) or ""
+        s.agents_default_model = _to_str(agents.get("default_model", s.agents_default_model), key_path="agents.default_model", source=_source_for("agents", "default_model")) or ""
         # Per-agent config
-        code_cfg = agents.get("code", {})
-        s.agent_code_model = code_cfg.get("model", s.agent_code_model) or ""
-        s.agent_code_permissions = code_cfg.get("permissions", s.agent_code_permissions)
-        plan_cfg = agents.get("plan", {})
-        s.agent_plan_model = plan_cfg.get("model", s.agent_plan_model) or ""
-        s.agent_plan_permissions = plan_cfg.get("permissions", s.agent_plan_permissions)
-        test_cfg = agents.get("test", {})
-        s.agent_test_model = test_cfg.get("model", s.agent_test_model) or ""
-        s.agent_test_permissions = test_cfg.get("permissions", s.agent_test_permissions)
-        review_cfg = agents.get("review", {})
-        s.agent_review_model = review_cfg.get("model", s.agent_review_model) or ""
-        s.agent_review_permissions = review_cfg.get("permissions", s.agent_review_permissions)
+        code_cfg = _ensure_table(agents, "code", source=_source_for("agents", "code"))
+        s.agent_code_model = _to_str(code_cfg.get("model", s.agent_code_model), key_path="agents.code.model", source=_source_for("agents", "code", "model")) or ""
+        s.agent_code_permissions = _normalize_agent_permissions(_to_str_list(code_cfg.get("permissions", s.agent_code_permissions), key_path="agents.code.permissions", source=_source_for("agents", "code", "permissions")))
+        plan_cfg = _ensure_table(agents, "plan", source=_source_for("agents", "plan"))
+        s.agent_plan_model = _to_str(plan_cfg.get("model", s.agent_plan_model), key_path="agents.plan.model", source=_source_for("agents", "plan", "model")) or ""
+        s.agent_plan_permissions = _normalize_agent_permissions(_to_str_list(plan_cfg.get("permissions", s.agent_plan_permissions), key_path="agents.plan.permissions", source=_source_for("agents", "plan", "permissions")))
+        test_cfg = _ensure_table(agents, "test", source=_source_for("agents", "test"))
+        s.agent_test_model = _to_str(test_cfg.get("model", s.agent_test_model), key_path="agents.test.model", source=_source_for("agents", "test", "model")) or ""
+        s.agent_test_permissions = _normalize_agent_permissions(_to_str_list(test_cfg.get("permissions", s.agent_test_permissions), key_path="agents.test.permissions", source=_source_for("agents", "test", "permissions")))
+        review_cfg = _ensure_table(agents, "review", source=_source_for("agents", "review"))
+        s.agent_review_model = _to_str(review_cfg.get("model", s.agent_review_model), key_path="agents.review.model", source=_source_for("agents", "review", "model")) or ""
+        s.agent_review_permissions = _normalize_agent_permissions(_to_str_list(review_cfg.get("permissions", s.agent_review_permissions), key_path="agents.review.permissions", source=_source_for("agents", "review", "permissions")))
         return s
 
     def as_dict(self) -> dict:
         return {
             "ollama": {"host": self.ollama_host, "embed_model": self.embed_model},
-            "opencode": {"auto_install": self.opencode_auto_install, "version": self.opencode_version},
             "init": {
-                "with_opencode_json": self.init_with_opencode_json,
-                "force_opencode_json": self.init_force_opencode_json,
-                "write_skills": self.init_write_skills,
-                "force_skills": self.init_force_skills,
                 "install_tools": self.init_install_tools,
                 "node_tooling": self.init_node_tooling,
                 "create_venv": self.init_create_venv,
                 "playwright": self.init_playwright,
                 "playwright_browsers": self.init_playwright_browsers,
+                "playwright_cli": self.init_playwright_cli,
             },
             "loop": {
                 "max_iters": self.loop_max_iters,
@@ -231,6 +452,12 @@ class OpenRalphSettings:
                 "test_report": self.loop_test_report,
                 "review_report": self.loop_review_report,
                 "final_report": self.loop_final_report,
+                "auto_mode": self.loop_auto_mode,
+                "max_feature_iters": self.loop_max_feature_iters,
+                "retry_failed": self.loop_retry_failed,
+                "smoke_check": self.loop_smoke_check,
+                "smoke_timeout": self.loop_smoke_timeout,
+                "max_tool_errors": self.loop_max_tool_errors,
             },
             "memory": {
                 "k": self.memory_k,
@@ -241,10 +468,20 @@ class OpenRalphSettings:
                 "exclude_dirs": self.memory_exclude_dirs,
                 "include_exts": self.memory_include_exts,
             },
+            "ui": {"dashboard": self.ui_dashboard},
             "logging": {
                 "level": self.log_level,
                 "console": self.log_console,
                 "file": self.log_file,
+                "raw_debug": self.log_raw_debug,
+            },
+            "sandbox": {
+                "enabled": self.sandbox_enabled,
+                "mode": self.sandbox_mode,
+                "docker_image": self.sandbox_docker_image,
+                "network": self.sandbox_network,
+                "fail_closed": self.sandbox_fail_closed,
+                "env_allowlist": self.sandbox_env_allowlist,
             },
             "proxy": {
                 "enabled": self.proxy_enabled,
@@ -258,6 +495,15 @@ class OpenRalphSettings:
                 "model_display": self.proxy_model_display,
                 "api_key": self.proxy_api_key,
                 "auto_start": self.proxy_auto_start,
+                "log_requests": self.proxy_log_requests,
+                "cors_enabled": self.proxy_cors_enabled,
+                "cors_allow_origin": self.proxy_cors_allow_origin,
+            },
+            "agent": {
+                "native": self.agent_native,
+                "max_turns": self.agent_max_turns,
+                "timeout": self.agent_timeout,
+                "max_output": self.agent_max_output,
             },
             "agents": {
                 "enabled": self.agents_enabled,
@@ -270,24 +516,34 @@ class OpenRalphSettings:
             },
         }
 
+
+def get_provider_config(settings: OpenRalphSettings, role: str = "") -> dict[str, object]:
+    model_map = {
+        "code": settings.agent_code_model,
+        "plan": settings.agent_plan_model,
+        "test": settings.agent_test_model,
+        "review": settings.agent_review_model,
+    }
+    model = model_map.get(role, "") or settings.agents_default_model or settings.proxy_model_id
+    return {
+        "base_url": f"http://127.0.0.1:{settings.proxy_listen_port}",
+        "api_key": settings.proxy_api_key,
+        "model": model,
+        "timeout": settings.agent_timeout,
+    }
+
+
 STARTER_TOML = """[ollama]
 host = "http://localhost:11434"
 embed_model = "nomic-embed-text"
 
-[opencode]
-auto_install = true
-version = ""            # empty = latest
-
 [init]
-with_opencode_json = true
-force_opencode_json = false
-write_skills = true
-force_skills = false
 install_tools = true
 node_tooling = "local"
 create_venv = false
 playwright = true
 playwright_browsers = true
+playwright_cli = true             # Install @playwright/cli for agent browser commands
 
 [loop]
 max_iters = 10
@@ -299,6 +555,12 @@ prd_qa_mode = "handoff"    # interactive|handoff|auto|auto-then-handoff
 test_report = ".ralph/TEST_REPORT.md"
 review_report = ".ralph/REVIEW_REPORT.md"
 final_report = ".ralph/FINAL.md"
+auto_mode = ""                         # "" (off) or "full" (PRD + plan + build all features)
+max_feature_iters = 5                  # Max iterations per feature when auto_mode = "full"
+retry_failed = true                    # Retry failed features on re-run
+smoke_check = true                     # Run runtime smoke checks after gate PASS
+smoke_timeout = 10                     # Per-check subprocess timeout in seconds
+max_tool_errors = 0                    # Downgrade success to warnings if tool errors exceed this
 
 [memory]
 k = 8
@@ -309,42 +571,63 @@ vacuum_warn_mb = 200
 exclude_dirs = [".git", "node_modules", ".venv", "venv", "dist", "build", ".ralph"]
 include_exts = [".md", ".mdx", ".markdown", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".scss", ".less", ".json", ".jsonc", ".yaml", ".yml", ".toml"]
 
+[ui]
+dashboard = true                        # Show live dashboard during 'openralph run'
+
 [logging]
 level = "INFO"                          # DEBUG, INFO, WARNING, ERROR, CRITICAL
 console = false                         # Log to stderr (in addition to Rich output)
 file = true                             # Log to .ralph/logs/openralph_*.log
+raw_debug = true                        # Write full untruncated provider/tool payload logs
+
+[sandbox]
+enabled = true                          # Enable sandbox for bash tool execution
+mode = "docker"                         # docker|local
+docker_image = "python:3.12-slim"      # Image used for sandboxed bash commands
+network = "bridge"                      # bridge|none
+fail_closed = true                      # If docker is unavailable, fail instead of local fallback
+env_allowlist = ["OLLAMA_HOST", "EMBED_MODEL", "BRAVE_API_KEY"]  # Env vars passed into container
 
 [proxy]
-enabled = false                         # Enable OpenCode proxy server
+enabled = true                          # Enable LLM proxy server
 listen_port = 18889                     # Local port proxy listens on
 target_host = "127.0.0.1"               # Backend LLM host
 target_port = 30000                     # Backend LLM port
 target_model = "openai/gpt-oss-120b"    # Model name to send to backend
-provider_name = "openclaw"              # Provider ID in opencode.json
+provider_name = "openclaw"              # Provider ID
 provider_display = "DGX gpt-OSS"        # Provider display name
-model_id = "chatgpt-oss"                # Model ID in opencode.json
+model_id = "chatgpt-oss"                # Model ID
 model_display = "ChatGPT-OSS 120B"      # Model display name
 api_key = "LOCAL_DGX"                   # API key to use
 auto_start = true                       # Auto-start proxy on init/run
+log_requests = false                    # Log each proxied request
+cors_enabled = false                    # Handle CORS preflight locally
+cors_allow_origin = "*"                 # Access-Control-Allow-Origin when CORS is enabled
+
+[agent]
+native = true                           # Use native agent (OpenCode removed)
+max_turns = 50                          # Max tool call iterations per agent run
+timeout = 120                           # Per-tool timeout in seconds
+max_output = 50000                      # Max chars per tool output
 
 [agents]
-enabled = true                          # Enable multi-agent support in opencode.json
+enabled = true                          # Enable multi-agent support
 default_provider = ""                   # Default provider for all agents (empty = use proxy provider)
 default_model = ""                      # Default model for all agents (empty = use proxy model)
 
 [agents.code]
 model = ""                              # Model override for code agent (empty = use default)
-permissions = ["bash", "edit", "skill", "lsp", "question"]
+permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "search"]
 
 [agents.plan]
 model = ""                              # Model override for plan agent (empty = use default)
-permissions = ["skill", "question"]     # Plan agent: read-only, no edit/bash
+permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"]
 
 [agents.test]
 model = ""                              # Model override for test agent (empty = use default)
-permissions = ["bash", "skill", "lsp", "question"]  # Test agent: can run tests, no edit
+permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"]
 
 [agents.review]
 model = ""                              # Model override for review agent (empty = use default)
-permissions = ["skill", "question"]     # Review agent: read-only analysis
+permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"]
 """

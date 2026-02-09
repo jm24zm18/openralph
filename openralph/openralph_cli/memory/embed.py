@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import urllib.request
+import urllib.error
 
 from ..logging import get_logger
 
@@ -29,7 +30,7 @@ def ollama_embed(ollama_host: str, model: str, text: str) -> list[float]:
                 log.debug("Got embedding from %s: %d dimensions", endpoint, len(data["embeddings"][0]))
                 return [float(x) for x in data["embeddings"][0]]
             log.debug("Unexpected response format from %s: %s", endpoint, list(data.keys()))
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, OSError) as e:
             errors.append(f"{endpoint}: {e}")
             log.debug("Endpoint %s failed: %s", endpoint, e)
             continue

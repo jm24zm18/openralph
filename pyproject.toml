@@ -1,7 +1,7 @@
 [project]
 name = "openralph"
 version = "0.1.0"
-description = "OpenRalph: a self-contained CLI orchestrator for OpenCode with repo memory, gates, git checkpoints, and skills."
+description = "OpenRalph: a self-contained CLI orchestrator with repo memory, gates, git checkpoints, and skills."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,3 +22,7 @@ include = ["openralph*"]
 
 [tool.setuptools.package-data]
 openralph = ["templates/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

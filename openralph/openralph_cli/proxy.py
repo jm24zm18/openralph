@@ -16,6 +16,22 @@ from dataclasses import dataclass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
+import logging
+
+
+log = logging.getLogger(__name__)
+
+_KNOWN_TOOL_NAMES = {
+    "bash",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "list_dir",
+    "search",
+    "repo_search",
+}
 
 
 @dataclass(frozen=True)
@@ -24,6 +40,9 @@ class ProxyConfig:
     target_host: str = "127.0.0.1"
     target_port: int = 30000
     target_model: str = "openai/gpt-oss-120b"
+    log_requests: bool = False
+    cors_enabled: bool = False
+    cors_allow_origin: str = "*"
 
 
 def _generate_call_id() -> str:
@@ -42,63 +61,82 @@ def _extract_reasoning(content: str) -> tuple[str | None, str]:
 
 def _clean_sglang_tags(content: str) -> str:
     content = re.sub(r"<\|start\|>assistant<\|channel\|>", "", content)
-    content = re.sub(r"<\|[^|>]+\|>", "", content)
-    return content
+    # Strip multi-word tag sequences like <|channel|>analysis or <|end|><|call|>
+    content = re.sub(r"(<\|[^|>]+\|>)+", "", content)
+    return content.strip()
 
 
 def _extract_tool_calls(content: str) -> tuple[list[dict], str | None]:
     tool_calls: list[dict] = []
-    tool_pattern = re.compile(
-        r"(?:commentary|analysis|assistantcommentary|analysiscommentary|assistant|final)?\s*"
-        r"to=(?:functions\.)?(\w+)\s*(?:json|code)?\s*\{",
-        re.IGNORECASE,
-    )
+
+    # Primary pattern: handles optional prefix words before to=functions.name
+    # Also tolerates residual SGLang tags between function name and JSON brace
+    tool_patterns = [
+        re.compile(
+            r"(?:commentary|analysis|assistantcommentary|analysiscommentary|assistant|final)?\s*"
+            r"to=(?:functions\.)?(\w+)\s*(?:json|code)?\s*(?:<\|[^|>]+\|>)*\s*\{",
+            re.IGNORECASE,
+        ),
+        # Fallback: bare to=name { without any prefix
+        re.compile(
+            r"to=(?:functions\.)?(\w+)\s*(?:<\|[^|>]+\|>)*\s*\{",
+            re.IGNORECASE,
+        ),
+    ]
 
     first_tool_idx = -1
     text_content = ""
 
-    pos = 0
-    while True:
-        match = tool_pattern.search(content, pos)
-        if not match:
-            break
-
-        if first_tool_idx == -1:
-            first_tool_idx = match.start()
-            text_content = content[:first_tool_idx].strip()
-
-        function_name = match.group(1)
-        start_brace = content.find("{", match.start())
-
-        if start_brace == -1:
-            pos = match.end()
-            continue
-
-        brace_count = 0
-        json_end = -1
-        for i in range(start_brace, len(content)):
-            if content[i] == "{":
-                brace_count += 1
-            elif content[i] == "}":
-                brace_count -= 1
-            if brace_count == 0:
-                json_end = i
+    for pattern in tool_patterns:
+        pos = 0
+        while True:
+            match = pattern.search(content, pos)
+            if not match:
                 break
 
-        if json_end == -1:
-            pos = match.end()
-            continue
+            if first_tool_idx == -1:
+                first_tool_idx = match.start()
+                text_content = content[:first_tool_idx].strip()
 
-        args_str = content[start_brace : json_end + 1]
-        tool_calls.append(
-            {
-                "index": len(tool_calls),
-                "id": _generate_call_id(),
-                "type": "function",
-                "function": {"name": function_name, "arguments": args_str},
-            }
-        )
-        pos = json_end + 1
+            function_name = _normalize_tool_name(match.group(1))
+            if not function_name:
+                pos = match.end()
+                continue
+            start_brace = content.find("{", match.start())
+
+            if start_brace == -1:
+                pos = match.end()
+                continue
+
+            brace_count = 0
+            json_end = -1
+            for i in range(start_brace, len(content)):
+                if content[i] == "{":
+                    brace_count += 1
+                elif content[i] == "}":
+                    brace_count -= 1
+                if brace_count == 0:
+                    json_end = i
+                    break
+
+            if json_end == -1:
+                pos = match.end()
+                continue
+
+            args_str = content[start_brace : json_end + 1]
+            tool_calls.append(
+                {
+                    "index": len(tool_calls),
+                    "id": _generate_call_id(),
+                    "type": "function",
+                    "function": {"name": function_name, "arguments": args_str},
+                }
+            )
+            pos = json_end + 1
+
+        # If the first pattern found results, don't try the fallback
+        if tool_calls:
+            break
 
     if tool_calls:
         cleaned_text = re.sub(
@@ -110,6 +148,51 @@ def _extract_tool_calls(content: str) -> tuple[list[dict], str | None]:
         return tool_calls, cleaned_text if cleaned_text else None
 
     return [], None
+
+
+def _normalize_tool_name(raw_name: str) -> str | None:
+    name = (raw_name or "").strip().lower()
+    if not name:
+        return None
+    if name in _KNOWN_TOOL_NAMES:
+        return name
+
+    # Recover from channel-text/schema suffixes leaking into the tool token.
+    suffixes = ("commentary", "analysis", "assistant", "final", "json", "code")
+    candidate = name
+    changed = True
+    while changed and candidate:
+        changed = False
+        for suffix in suffixes:
+            if candidate.endswith(suffix) and len(candidate) > len(suffix):
+                trimmed = candidate[: -len(suffix)].rstrip("_")
+                if trimmed and trimmed != candidate:
+                    candidate = trimmed
+                    changed = True
+                    break
+    if candidate in _KNOWN_TOOL_NAMES:
+        return candidate
+
+    # Recover merged names like "list_dirjson" without separators.
+    for tool_name in _KNOWN_TOOL_NAMES:
+        if not name.startswith(tool_name):
+            continue
+        tail = name[len(tool_name):]
+        if not tail:
+            return tool_name
+        tail_candidate = tail
+        tail_changed = True
+        while tail_changed and tail_candidate:
+            tail_changed = False
+            for suffix in suffixes:
+                if tail_candidate.endswith(suffix) and len(tail_candidate) >= len(suffix):
+                    tail_candidate = tail_candidate[: -len(suffix)]
+                    tail_changed = True
+                    break
+        if tail_candidate == "":
+            return tool_name
+
+    return None
 
 
 def _clean_message_prefix(content: str) -> str:
@@ -220,7 +303,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     config: ProxyConfig
 
     def log_message(self, format: str, *args: Any) -> None:
-        msg = f"[OpenCode-Proxy] {format % args}"
+        if not self.config.log_requests:
+            return
+        msg = f"[OpenRalph-Proxy] {format % args}"
         print(msg, file=sys.stderr)
 
     def do_GET(self) -> None:
@@ -236,14 +321,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._proxy_request()
 
     def do_OPTIONS(self) -> None:
+        if self.config.cors_enabled and self.path.startswith("/v1/"):
+            self.send_response(204)
+            self._add_cors_headers()
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.end_headers()
+            return
         self._proxy_request()
+
+    def _add_cors_headers(self) -> None:
+        if not self.config.cors_enabled:
+            return
+        self.send_header("Access-Control-Allow-Origin", self.config.cors_allow_origin)
+        self.send_header("Access-Control-Allow-Credentials", "true")
+
+    def _safe_send_error(self, code: int, message: str) -> None:
+        try:
+            self.send_error(code, message)
+        except (BrokenPipeError, ConnectionResetError):
+            if self.config.log_requests:
+                self.log_message("Client disconnected before error response could be sent")
 
     def _proxy_request(self) -> None:
         config = self.config
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
 
-        self.log_message("Incoming: %s %s", self.command, self.path)
+        if self.config.log_requests:
+            self.log_message("Incoming: %s %s", self.command, self.path)
 
         clean_body = body
         original_model = ""
@@ -273,40 +380,58 @@ class ProxyHandler(BaseHTTPRequestHandler):
             response_headers = dict(e.headers) if e.headers else {}
             status_code = e.code
         except urllib.error.URLError as e:
-            self.send_error(502, f"Proxy Error: {e.reason}")
+            self._safe_send_error(502, f"Proxy Error: {e.reason}")
             return
-        except Exception as e:
-            self.send_error(502, f"Proxy Error: {e}")
+        except OSError as e:
+            self._safe_send_error(502, f"Proxy Error: {e}")
             return
 
         content_type = response_headers.get("Content-Type", "")
-        if "application/json" in content_type:
+        is_json_ct = "application/json" in content_type
+        if not is_json_ct and response_body.lstrip().startswith("{"):
+            is_json_ct = True
+        if is_json_ct:
             result, is_stream = _transform_response(response_body, original_model, client_wants_stream)
 
             if is_stream:
                 self.send_response(200)
+                self._add_cors_headers()
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
-                for chunk in result:  # type: ignore[union-attr]
-                    self.wfile.write(chunk.encode("utf-8"))
+                try:
+                    for chunk in result:  # type: ignore[union-attr]
+                        self.wfile.write(chunk.encode("utf-8"))
+                except (BrokenPipeError, ConnectionResetError):
+                    if self.config.log_requests:
+                        self.log_message("Client disconnected during streamed response")
             else:
                 final_body = result.encode("utf-8") if isinstance(result, str) else b"".join(c.encode() for c in result)
                 self.send_response(status_code)
+                self._add_cors_headers()
                 for k, v in response_headers.items():
                     if k.lower() not in ("content-length", "transfer-encoding"):
                         self.send_header(k, v)
                 self.send_header("Content-Length", str(len(final_body)))
                 self.end_headers()
-                self.wfile.write(final_body)
+                try:
+                    self.wfile.write(final_body)
+                except (BrokenPipeError, ConnectionResetError):
+                    if self.config.log_requests:
+                        self.log_message("Client disconnected during response write")
         else:
             self.send_response(status_code)
+            self._add_cors_headers()
             for k, v in response_headers.items():
                 if k.lower() != "transfer-encoding":
                     self.send_header(k, v)
             self.end_headers()
-            self.wfile.write(response_body.encode("utf-8"))
+            try:
+                self.wfile.write(response_body.encode("utf-8"))
+            except (BrokenPipeError, ConnectionResetError):
+                if self.config.log_requests:
+                    self.log_message("Client disconnected during passthrough response write")
 
 
 class ProxyServer:
@@ -322,7 +447,7 @@ class ProxyServer:
         self._server = HTTPServer(("0.0.0.0", self.config.listen_port), handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=daemon)
         self._thread.start()
-        print(f"[OpenCode-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
+        print(f"[OpenRalph-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
 
     def stop(self) -> None:
         if self._server:
@@ -337,7 +462,7 @@ class ProxyServer:
         handler.config = self.config
 
         self._server = HTTPServer(("0.0.0.0", self.config.listen_port), handler)
-        print(f"[OpenCode-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
+        print(f"[OpenRalph-Proxy] Listening on port {self.config.listen_port}", file=sys.stderr)
         self._server.serve_forever()
 
 
@@ -387,8 +512,8 @@ def _start_proxy_background_unix(config: ProxyConfig, pid_file: Path, log_file: 
     server = ProxyServer(config)
     try:
         server.serve_forever()
-    except Exception:
-        pass
+    except OSError as e:
+        log.warning("Proxy server stopped with OS error: %s", e)
     finally:
         if pid_file.exists():
             pid_file.unlink()
@@ -407,6 +532,9 @@ config = ProxyConfig(
     target_host={repr(config.target_host)},
     target_port={config.target_port},
     target_model={repr(config.target_model)},
+    log_requests={bool(config.log_requests)},
+    cors_enabled={bool(config.cors_enabled)},
+    cors_allow_origin={repr(config.cors_allow_origin)},
 )
 server = ProxyServer(config)
 server.serve_forever()
@@ -489,7 +617,7 @@ def proxy_status(pid_file: Path, listen_port: int) -> tuple[bool, int | None]:
         sock.close()
         if result == 0:
             return True, pid
-    except Exception:
+    except OSError:
         pass
 
     return False, pid
@@ -502,5 +630,5 @@ def proxy_is_listening(port: int) -> bool:
         result = sock.connect_ex(("127.0.0.1", port))
         sock.close()
         return result == 0
-    except Exception:
+    except OSError:
         return False

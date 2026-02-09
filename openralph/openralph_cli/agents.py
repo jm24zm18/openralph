@@ -25,9 +25,6 @@ Key folders:
   Agent loop state, memory, and coordination files.
   Do not delete unless you know what you're doing.
 
-- **.opencode/**
-  OpenCode configuration and skills.
-
 ---
 
 ## 2. Feature specification folders
@@ -71,6 +68,9 @@ Important files in `.ralph/`:
   Output from the testing agent.
   Must include `Gate: PASS` or `Gate: FAIL`.
 
+- **STACK.md**
+  Selected tech stack for this repo. Agents should not change it unless required.
+
 - **REVIEW_REPORT.md**
   Product/user review feedback.
 
@@ -106,6 +106,8 @@ Agents must follow the minimal install policy:
 - Prefer project-declared tooling and lockfiles.
 - Install only what is required to run lint/tests.
 - Never upgrade dependencies automatically.
+- Never embed environment-mutating installs in tests (for example `pip install -e .`).
+- Tests must run against an already prepared project environment.
 - If install strategy is ambiguous, ask via HUMAN_REQUEST.md.
 
 See:

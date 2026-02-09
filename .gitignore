@@ -33,3 +33,33 @@ ENV/
 
 # OpenRalph runtime
 .ralph/
+
+# === openralph (managed) ===
+# DO NOT EDIT INSIDE THIS BLOCK (use: openralph gitignore sync)
+
+.ralph/*
+!.ralph/test-policy.md
+!.ralph/install-policy.md
+!.ralph/CURRENT_FEATURE
+.ralph/logs/
+.ralph/*.diff
+.ralph/*.patch
+.ralph/memory.sqlite3
+.ralph/memory.sqlite3-wal
+.ralph/memory.sqlite3-shm
+.ralph/proxy.pid
+.ralph/node-tools/
+.ralph/TEST_REPORT.md
+.ralph/REVIEW_REPORT.md
+.ralph/FINAL.md
+.ralph/DONE
+.ralph/HUMAN_REQUEST.md
+.ralph/HUMAN_RESPONSE.md
+.venv/
+venv/
+playwright-report/
+test-results/
+.playwright/
+*.trace.zip
+
+# === /openralph (managed) ===

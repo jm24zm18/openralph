@@ -4,8 +4,7 @@ This document provides AI assistants with context about the OpenRalph codebase s
 
 ## Project Overview
 
-OpenRalph is a self-contained CLI orchestrator for **OpenCode** that provides:
-- Bundled OpenCode binary per repo (`.ralph/bin/opencode`)
+OpenRalph is a self-contained CLI orchestrator for native agents that provides:
 - Multi-tier configuration system (global + repo-local)
 - Semantic memory index using SQLite + Ollama embeddings
 - Git checkpoint/rollback integration
@@ -19,7 +18,6 @@ OpenRalph is a self-contained CLI orchestrator for **OpenCode** that provides:
 - **Rich** - Terminal formatting and colored output
 - **SQLite 3** - Embedded database for memory storage (with WAL mode)
 - **Ollama** - External embeddings service (e.g., `nomic-embed-text`)
-- **OpenCode** - Bundled binary for AI-assisted code generation
 
 ## Project Structure
 
@@ -34,9 +32,6 @@ openralph/
 │       ├── loop.py                 # Main orchestration loop
 │       ├── git_manager.py          # Branch/commit/rollback helpers
 │       ├── gitignore.py            # .gitignore managed block sync
-│       ├── opencode_manager.py     # OpenCode binary bundling
-│       ├── opencode_config.py      # opencode.json generation
-│       ├── skills_generator.py     # Skill template generation
 │       ├── tooling.py              # Tool checks/installs, doctor report
 │       ├── policies.py             # Test/install policy templates
 │       ├── repo.py                 # Repository validation
@@ -68,10 +63,10 @@ openralph                           # Root Typer app
 ├── gitignore
 │   ├── show                        # Preview managed block
 │   └── sync                        # Sync .gitignore block
-├── opencode
-│   ├── install [--version X]       # Install OpenCode binary
-│   ├── where                       # Show binary location
-│   └── version                     # Show binary version
+├── proxy
+│   ├── start                       # Start LLM proxy
+│   ├── stop                        # Stop LLM proxy
+│   └── status                      # Show proxy status
 └── memory
     ├── index                       # Index repo files
     ├── query <q> [--k N]           # Semantic search
@@ -93,13 +88,7 @@ openralph                           # Root Typer app
 host = "http://localhost:11434"
 embed_model = "nomic-embed-text"
 
-[opencode]
-auto_install = true
-version = ""                    # empty = latest
-
 [init]
-with_opencode_json = true
-write_skills = true
 install_tools = true
 node_tooling = "local"          # "global" or "local"
 create_venv = false
@@ -122,7 +111,6 @@ include_exts = [".md", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".j
 ## Runtime Paths (.ralph directory)
 
 The `.ralph/` directory contains all runtime artifacts:
-- `.ralph/bin/opencode` - Bundled OpenCode binary
 - `.ralph/memory.sqlite3` - Semantic index database
 - `.ralph/logs/iter-{n}.log` - Iteration logs from run loop
 - `.ralph/node-tools/` - Local Node.js packages (if node_tooling=local)
@@ -144,7 +132,7 @@ The `.ralph/` directory contains all runtime artifacts:
 - Branch names: lowercase, hyphen-separated, max 40 chars
 
 ### Error Handling
-- Raise `RuntimeError` for critical failures (e.g., OpenCode not found)
+- Raise `RuntimeError` for critical failures (e.g., proxy unavailable)
 - Use `typer.Exit(code=1)` for CLI error reporting
 - "Best-effort" operations silently continue on failure (e.g., memory indexing in loop)
 
@@ -173,7 +161,7 @@ settings = OpenRalphSettings.load(repo_path)
 3. For each iteration:
    - Query memory with prompt
    - Inject top hits into combined prompt
-   - Call `opencode run <prompt>`
+   - Call native agent with tool support
    - On gate pass: commit checkpoint, exit
    - On gate fail: optionally rollback after N failures
    - Reindex memory (best-effort)
@@ -236,7 +224,6 @@ External:
 | `settings.py` | Config loading, defaults, STARTER_TOML template |
 | `loop.py` | Main run loop orchestration |
 | `paths.py` | `Paths` dataclass for .ralph subdirectories |
-| `opencode_manager.py` | OpenCode binary download/installation |
 | `memory/index.py` | File chunking and embedding |
 | `memory/query.py` | Semantic search implementation |
 | `git_manager.py` | Git operations (branch, commit, rollback) |

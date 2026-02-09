@@ -1,13 +1,11 @@
 # OpenRalph
 
-OpenRalph is a self-contained CLI that orchestrates **OpenCode** for agent-driven repo work, with:
+OpenRalph is a self-contained CLI that orchestrates native agents for repo work, with:
 
-- Bundled **OpenCode** binary per repo (`.ralph/bin/opencode`)
 - Global + repo-local **OpenRalph config** (`.openralph.toml`, `~/.config/openralph/config.toml`)
-- Schema-correct **OpenCode config** (`opencode.json`)
-- OpenCode **skills** under `.opencode/skills/*/SKILL.md`
 - Gitignore managed block (`openralph gitignore sync`)
 - Per-project **memory index** in SQLite using **Ollama** embeddings (e.g. `nomic-embed-text`)
+- Bug index generated in `docs/bugs/index.md` from `.ralph/issues.json`
 - Optional tool installs: pylsp, node language servers, Playwright
 
 ## Install (dev)
@@ -16,12 +14,27 @@ OpenRalph is a self-contained CLI that orchestrates **OpenCode** for agent-drive
 pip install -e .
 ```
 
+## Install (pipx)
+
+```bash
+pipx install --force /home/justin/openralph
+```
+
+OpenRalph auto-loads a repo-local `.env` file (if present) before reading settings.
+Example:
+
+```bash
+BRAVE_API_KEY=your_key_here
+OPENRALPH_SEARCH_PROVIDER=brave
+```
+
 ## Quickstart
 
 ```bash
 openralph config init --scope global
 openralph init . --node-tooling local --create-venv
 openralph doctor .
+openralph --version
 ```
 
 ## Run loop (scaffold)

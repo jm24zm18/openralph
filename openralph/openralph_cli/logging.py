@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,9 @@ _initialized: bool = False
 _log_file_path: Optional[Path] = None
 _log_level: int = logging.INFO
 _console_enabled: bool = True
+_raw_debug_enabled: bool = False
+_raw_log_files: dict[str, Optional[Path]] = {"provider": None, "tools": None}
+_raw_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,7 @@ class LogConfig:
     level: str = "INFO"
     console: bool = True
     file: bool = True
+    raw_debug: bool = False
     file_path: Optional[Path] = None
     format: str = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     date_format: str = "%Y-%m-%d %H:%M:%S"
@@ -56,13 +61,15 @@ class ColoredFormatter(logging.Formatter):
 
 
 def init_logging(config: LogConfig, log_dir: Optional[Path] = None) -> None:
-    global _initialized, _log_file_path, _log_level, _console_enabled
+    global _initialized, _log_file_path, _log_level, _console_enabled, _raw_debug_enabled, _raw_log_files
 
     if _initialized:
         return
 
     _log_level = _level_from_str(config.level)
     _console_enabled = config.console
+    _raw_debug_enabled = bool(config.raw_debug)
+    _raw_log_files = {"provider": None, "tools": None}
 
     root_logger = logging.getLogger("openralph")
     root_logger.setLevel(_log_level)
@@ -88,6 +95,10 @@ def init_logging(config: LogConfig, log_dir: Optional[Path] = None) -> None:
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
 
+        if _raw_debug_enabled:
+            _raw_log_files["provider"] = log_dir / f"raw_provider_{timestamp}.log"
+            _raw_log_files["tools"] = log_dir / f"raw_tools_{timestamp}.log"
+
     _initialized = True
 
 
@@ -105,10 +116,38 @@ def get_log_file() -> Optional[Path]:
     return _log_file_path
 
 
+def raw_debug_enabled() -> bool:
+    return _raw_debug_enabled
+
+
+def get_raw_log_file(channel: str) -> Optional[Path]:
+    return _raw_log_files.get(channel)
+
+
+def raw_log(channel: str, payload: str) -> None:
+    if not _raw_debug_enabled:
+        return
+    target = _raw_log_files.get(channel)
+    if target is None:
+        return
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    block = f"\n===== {stamp} [{channel}] =====\n{payload}\n"
+    try:
+        with _raw_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as fh:
+                fh.write(block)
+    except OSError:
+        # Raw logs are best-effort and should never break normal execution.
+        return
+
+
 def reset_logging() -> None:
-    global _initialized, _log_file_path, _loggers
+    global _initialized, _log_file_path, _loggers, _raw_debug_enabled, _raw_log_files
     _initialized = False
     _log_file_path = None
+    _raw_debug_enabled = False
+    _raw_log_files = {"provider": None, "tools": None}
     _loggers.clear()
     root_logger = logging.getLogger("openralph")
     root_logger.handlers.clear()

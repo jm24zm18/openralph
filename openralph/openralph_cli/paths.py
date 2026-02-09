@@ -28,6 +28,9 @@ class Paths:
     # Auto-plan pipeline
     feature_queue: Path
     issues: Path
+    # Run status artifacts
+    run_status: Path
+    run_summary: Path
 
     @staticmethod
     def for_repo(repo: Path) -> "Paths":
@@ -59,4 +62,7 @@ class Paths:
             # Auto-plan pipeline
             feature_queue=ralph / "feature-queue.json",
             issues=ralph / "issues.json",
+            # Run status artifacts
+            run_status=ralph / "RUN_STATUS.json",
+            run_summary=ralph / "RUN_SUMMARY.md",
         )

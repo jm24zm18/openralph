@@ -46,6 +46,7 @@ def render_managed_block(opts: GitignoreOptions) -> str:
         lines.append("playwright-report/")
         lines.append("test-results/")
         lines.append(".playwright/")
+        lines.append(".playwright-cli/")
         lines.append("*.trace.zip")
     lines.append("")
     lines.append(MANAGED_END)

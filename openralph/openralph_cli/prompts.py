@@ -4,41 +4,65 @@ from __future__ import annotations
 # ── System prompts ──────────────────────────────────────────────────────
 
 TOOL_RULES = """\
-Tools available: bash, read_file, write_file, edit_file, glob, grep, list_dir, search.
+Tools available: bash, read_file, write_file, edit_file, glob, grep, list_dir, search, repo_search.
 
 Rules:
 - Use ONLY the tools listed above. Do not invent tool names.
 - If a tool is not listed, do not use it. Ask for guidance or use bash.
 - Do NOT use: mkdir, open_file, bashjson, ls.
 - If a tool fails due to missing args, retry with the correct schema.
+- If you call an unsupported tool, immediately retry with one of the listed tools.
 - Tool arguments must be valid JSON (double quotes, no trailing commas).
+- Use repo_search/grep/glob/list_dir/read_file for repository lookup.
+- Use search only for external docs, updated info, and best practices.
+- Before using search, exhaust local repo tools first.
+- Avoid repeated broad web searches; one focused query is preferred unless new evidence requires another.
+- Avoid repeated discovery loops: after 3 list/search/glob calls, switch to edits or targeted execution.
+- Do not add `pip install -e .` (or equivalent editable installs) to tests or runtime test commands.
+- Tests must assume dependencies are pre-installed in the project environment.
 
 Tool examples:
-- bash: {{"command": "pytest -q", "timeout": 120}}
-- read_file: {{"path": "README.md", "start_line": 1, "end_line": 200}}
-- write_file: {{"path": "notes.txt", "content": "Hello"}}
-- edit_file: {{"path": "app.py", "old_text": "foo", "new_text": "bar"}}
-- glob: {{"pattern": "**/*.py", "path": "."}}
-- grep: {{"pattern": "TODO", "path": ".", "include": "*.py"}}
-- list_dir: {{"path": "."}}
-- search: {{"query": "pytest fixtures", "max_results": 5}}
+- bash: {"command": "python3 -m pytest -q", "timeout": 120}
+- read_file: {"path": "README.md", "start_line": 1, "end_line": 200}
+- write_file: {"path": "notes.txt", "content": "Hello"}
+- edit_file: {"path": "app.py", "old_text": "foo", "new_text": "bar"}
+- glob: {"pattern": "**/*.py", "path": "."}
+- grep: {"pattern": "TODO", "path": ".", "include": "*.py"}
+- list_dir: {"path": "."}
+- search: {"query": "pytest fixtures", "max_results": 5}
+- repo_search: {"query": "GameOverScreen", "path": ".", "max_results": 20}
+"""
+
+PLAYWRIGHT_CLI_RULES = """\
+
+Browser automation (playwright-cli):
+If the project has a web UI, you can interact with it via bash:
+- playwright-cli open <url>       # Open a page in headless browser
+- playwright-cli click "text"     # Click element by visible text
+- playwright-cli type "text"      # Type into focused element
+- playwright-cli fill "sel" "val" # Fill form field by selector
+- playwright-cli screenshot       # Capture page screenshot
+- playwright-cli snapshot         # Get page accessibility tree
+- playwright-cli close            # Close browser session
+- playwright-cli --help           # See all available commands
 """
 
 BUILDER_SYSTEM = """\
 You are a code builder agent working on a software project.
 
-""" + TOOL_RULES + """
+""" + TOOL_RULES + PLAYWRIGHT_CLI_RULES + """
 - Make targeted edits with edit_file. Don't rewrite entire files unless necessary.
 - Read existing code before modifying it. Understand the project structure first.
 - You MUST produce runnable source code, not just documentation or PRDs.
+- Do NOT fake third-party dependencies by creating local stub modules/packages with the same import name (e.g., `pygame.py`, `pygame/__init__.py`) unless explicitly required by specs.
 - Run the project's existing tests after making changes (if a test command exists).
 - Address test failures and review feedback from prior iterations before new work.
 - Keep PRD and feature specs aligned with your implementation.
 - If you need a human decision, write to .ralph/HUMAN_REQUEST.md and stop.
-- When you finish ALL requested changes: write a summary to {final_path} and create the file .ralph/DONE (contents don't matter, just create it).
+- When you finish ALL requested changes: write a summary to FINAL_PATH and create the file .ralph/DONE (contents don't matter, just create it).
 """
 
-TEST_SYSTEM = "You are a testing agent.\n\n" + TOOL_RULES + "Run tests, verify functionality, and report results."
+TEST_SYSTEM = "You are a testing agent.\n\n" + TOOL_RULES + PLAYWRIGHT_CLI_RULES + "Run tests, verify functionality, and report results."
 
 REVIEW_SYSTEM = "You are a product review agent.\n\n" + TOOL_RULES + "Check alignment with PRD and identify issues."
 
@@ -89,6 +113,8 @@ def build_builder_prompt(
     human_response: str,
     final_path: str,
     open_issues: str,
+    goal_contract: str = "",
+    auto_mode: bool = False,
 ) -> str:
     parts = [user_prompt]
     if memory_context:
@@ -105,13 +131,19 @@ def build_builder_prompt(
         parts.append("\n\n# Human Response\n" + human_response)
     if open_issues:
         parts.append("\n\n# Known issues from prior iterations\n" + open_issues)
-    parts.append(
+    if goal_contract:
+        parts.append("\n\n# Prompt-level acceptance contract\n" + goal_contract)
+    rules = (
         "\n\nRules:\n"
         "- Address test failures first.\n"
         "- Keep PRD and feature specs aligned.\n"
-        "- If you need a decision, write to .ralph/HUMAN_REQUEST.md and stop.\n"
-        f"- When complete: write {final_path} and create .ralph/DONE."
     )
+    if auto_mode:
+        rules += "- Auto mode is enabled: do not ask for human input; make explicit assumptions and continue.\n"
+    else:
+        rules += "- If you need a decision, write to .ralph/HUMAN_REQUEST.md and stop.\n"
+    rules += f"- When complete: write {final_path} and create .ralph/DONE."
+    parts.append(rules)
     return "".join(parts)
 
 
@@ -120,7 +152,15 @@ def build_test_prompt(
     git_ctx: str,
     test_policy: str,
     stack_context: str,
+    goal_contract: str = "",
 ) -> str:
+    goal_section = ""
+    if goal_contract:
+        goal_section = (
+            "\nPrompt-level acceptance contract (must be validated):\n"
+            f"{goal_contract}\n"
+        )
+
     return (
         "You are the Testing Agent.\n\n"
         + TOOL_RULES + "\n"
@@ -128,6 +168,8 @@ def build_test_prompt(
         "- Prefer running fast checks first.\n"
         "- If you run commands, keep them minimal and relevant.\n"
         "- If dependencies are missing, say what's needed and propose the smallest install steps.\n\n"
+        "- Do NOT mutate the environment from tests (no pip install in tests, no pip install -e .).\n\n"
+        "- Treat local modules that shadow declared third-party dependencies (e.g., local `pygame/` while `pygame` is in requirements) as a gate failure.\n\n"
         f"Write a markdown report to the file: {report_path}\n"
         "It must include a line: Gate: PASS or Gate: FAIL.\n"
         "That line must be standalone (no heading markup like '##').\n\n"
@@ -144,6 +186,7 @@ def build_test_prompt(
         f"{git_ctx}\n\n"
         "Selected tech stack:\n"
         f"{stack_context or 'Not set'}\n\n"
+        f"{goal_section}"
         "Test policy (if present):\n"
         f"{test_policy}\n"
     )
@@ -155,7 +198,27 @@ def build_review_prompt(
     test_report: str,
     git_ctx: str,
     report_path: str,
+    goal_contract: str = "",
+    auto_mode: bool = False,
 ) -> str:
+    tail = (
+        "## Open assumptions (auto mode)\n\n"
+        "Auto mode is enabled. Do not ask for human input; document assumptions instead.\n"
+    ) if auto_mode else "## Questions (if any)\n"
+
+    human_rule = (
+        "Auto mode is enabled: do NOT write .ralph/HUMAN_REQUEST.md.\n"
+        "If context is missing, write assumptions under 'Open assumptions (auto mode)'.\n"
+    ) if auto_mode else "If a decision is required, write .ralph/HUMAN_REQUEST.md and stop.\n"
+
+    goal_section = ""
+    if goal_contract:
+        goal_section = (
+            "\nPrompt-level acceptance contract:\n"
+            f"{goal_contract}\n"
+            "Validate each item explicitly under the acceptance checklist.\n\n"
+        )
+
     return (
         "You are the Product/Review Agent.\n\n"
         + TOOL_RULES + "\n"
@@ -172,6 +235,7 @@ def build_review_prompt(
         f"{test_report}\n\n"
         "Recent changes:\n"
         f"{git_ctx}\n\n"
+        f"{goal_section}"
         f"Write a markdown report to the file: {report_path}\n"
         "Include sections:\n"
         "# Review Report\n"
@@ -179,8 +243,8 @@ def build_review_prompt(
         "## User-impact / UX notes\n"
         "## Risks / edge cases\n"
         "## Acceptance criteria checklist\n"
-        "## Questions (if any)\n\n"
-        "If a decision is required, write .ralph/HUMAN_REQUEST.md and stop.\n"
+        f"{tail}\n"
+        f"{human_rule}"
     )
 
 

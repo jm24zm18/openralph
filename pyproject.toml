@@ -22,3 +22,7 @@ include = ["openralph*"]
 
 [tool.setuptools.package-data]
 openralph = ["templates/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

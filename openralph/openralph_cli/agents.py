@@ -106,6 +106,8 @@ Agents must follow the minimal install policy:
 - Prefer project-declared tooling and lockfiles.
 - Install only what is required to run lint/tests.
 - Never upgrade dependencies automatically.
+- Never embed environment-mutating installs in tests (for example `pip install -e .`).
+- Tests must run against an already prepared project environment.
 - If install strategy is ambiguous, ask via HUMAN_REQUEST.md.
 
 See:

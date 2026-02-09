@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,10 +17,17 @@ class ToolStatus:
     hint: str = ""
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True)
+    env = _build_runtime_env(cwd.resolve() if cwd else None)
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, env=env)
 
 def _have_bin(name: str) -> bool:
-    return shutil.which(name) is not None
+    env = _build_runtime_env(None)
+    return shutil.which(name, path=env.get("PATH")) is not None
+
+
+def _which_runtime_bin(name: str, repo: Path | None = None) -> str | None:
+    env = _build_runtime_env(repo.resolve() if repo else None)
+    return shutil.which(name, path=env.get("PATH"))
 
 def _find_system_python() -> str:
     """Find a system Python interpreter for --user installs.
@@ -27,8 +35,10 @@ def _find_system_python() -> str:
     When running inside pipx/venv, sys.executable can't do --user installs.
     Find python3 or python on the system PATH instead.
     """
+    env = _build_runtime_env(None)
+    path = env.get("PATH")
     for name in ("python3", "python"):
-        py = shutil.which(name)
+        py = shutil.which(name, path=path)
         if py:
             # Verify it's not inside a venv by checking for --user support
             p = subprocess.run(
@@ -39,6 +49,34 @@ def _find_system_python() -> str:
                 return py
     # Fallback to sys.executable if nothing better found
     return sys.executable
+
+
+def _build_runtime_env(repo: Path | None) -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries: list[str] = []
+
+    if repo is not None:
+        local_bin = repo / ".ralph" / "node-tools" / "node_modules" / ".bin"
+        if local_bin.is_dir():
+            path_entries.append(str(local_bin))
+
+    home = Path.home()
+    local_user_bin = home / ".local" / "bin"
+    if local_user_bin.is_dir():
+        path_entries.append(str(local_user_bin))
+
+    nvm_versions = home / ".nvm" / "versions" / "node"
+    if nvm_versions.is_dir():
+        candidates = sorted(nvm_versions.glob("v*/bin"), reverse=True)
+        for candidate in candidates:
+            if candidate.is_dir():
+                path_entries.append(str(candidate))
+                break
+
+    existing = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    merged = path_entries + [p for p in existing if p not in path_entries]
+    env["PATH"] = os.pathsep.join(merged)
+    return env
 
 def _is_externally_managed_python(py: str) -> bool:
     """Check if Python is externally managed (PEP 668)."""
@@ -113,7 +151,7 @@ def _ollama_ok(host: str) -> tuple[bool, str]:
         with urllib.request.urlopen(req, timeout=3) as resp:
             _ = resp.read()
         return True, "reachable"
-    except Exception as e:
+    except (urllib.error.URLError, OSError) as e:
         return False, f"not reachable ({e})"
 
 def _npm_ok() -> tuple[bool, str]:
@@ -166,7 +204,7 @@ def _proxy_is_listening(port: int) -> bool:
         result = sock.connect_ex(("127.0.0.1", port))
         sock.close()
         return result == 0
-    except Exception:
+    except OSError:
         return False
 
 def _proxy_pid_active(pid_file: Path) -> tuple[bool, int | None]:
@@ -186,6 +224,7 @@ def ensure_tools(
     node_tooling: str = "global",
     install_playwright: bool = True,
     install_playwright_browsers: bool = True,
+    install_playwright_cli: bool = True,
     ollama_host: str = "http://localhost:11434",
     embed_model: str = "nomic-embed-text",
 ) -> list[ToolStatus]:
@@ -274,10 +313,44 @@ def ensure_tools(
                 system_py = _find_system_python()
                 p = _run([system_py, "-m", "playwright", "install", "chromium"])
             results.append(ToolStatus("playwright-browsers-chromium", p.returncode == 0, p.stderr.strip() or p.stdout.strip()))
+
+    if install_playwright_cli:
+        have_pw_cli = _have_bin("playwright-cli") or _have_bin_in("playwright-cli", local_bin)
+        if have_pw_cli:
+            mode = "local" if _have_bin_in("playwright-cli", local_bin) else "global"
+            results.append(ToolStatus("playwright-cli", True, f"found ({mode})"))
+        else:
+            if not install:
+                results.append(ToolStatus("playwright-cli", False, "missing", hint="npm install @playwright/cli"))
+            else:
+                pw_cli_pkgs = ["@playwright/cli"]
+                if node_tooling == "local":
+                    ok_cli, msg_cli = _ensure_node_tools_local(repo, pw_cli_pkgs)
+                else:
+                    ok_cli, msg_cli = _ensure_node_tools_global(pw_cli_pkgs)
+                have_pw_cli = _have_bin("playwright-cli") or _have_bin_in("playwright-cli", local_bin)
+                ok_cli = ok_cli and have_pw_cli
+                results.append(ToolStatus("playwright-cli", ok_cli, msg_cli))
+
+                if ok_cli and install_playwright_browsers:
+                    pw_cli_bin = "playwright-cli"
+                    if _have_bin_in("playwright-cli", local_bin):
+                        pw_cli_bin = str(local_bin / "playwright-cli")
+                    p = _run([pw_cli_bin, "install", "chromium"])
+                    if p.returncode != 0:
+                        results.append(ToolStatus("playwright-cli-browsers", False, p.stderr.strip() or p.stdout.strip()))
+
+                if ok_cli:
+                    pw_cli_bin = "playwright-cli"
+                    if _have_bin_in("playwright-cli", local_bin):
+                        pw_cli_bin = str(local_bin / "playwright-cli")
+                    _run([pw_cli_bin, "install", "--skills"])  # best-effort
+
     return results
 
 def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn_mb: float = 200.0,
-                  proxy_enabled: bool = False, proxy_listen_port: int = 18889) -> list[ToolStatus]:
+                  proxy_enabled: bool = False, proxy_listen_port: int = 18889,
+                  sandbox_mode: str = "docker") -> list[ToolStatus]:
     repo = repo.resolve()
     local_bin = repo / ".ralph" / "node-tools" / "node_modules" / ".bin"
     statuses: list[ToolStatus] = []
@@ -292,6 +365,13 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
         statuses.append(ToolStatus("memory-db", True, f"present ({size_mb:.1f} MB)", hint=hint))
     else:
         statuses.append(ToolStatus("memory-db", False, "missing", hint="Run openralph init or openralph memory index"))
+
+    runtime_python = _find_system_python()
+    statuses.append(ToolStatus("python-runtime", bool(runtime_python), runtime_python or "missing"))
+    runtime_node = _which_runtime_bin("node", repo)
+    statuses.append(ToolStatus("node-runtime", bool(runtime_node), runtime_node or "missing", hint="Install Node.js or ensure PATH is available to OpenRalph"))
+    runtime_npm = _which_runtime_bin("npm", repo)
+    statuses.append(ToolStatus("npm-runtime", bool(runtime_npm), runtime_npm or "missing", hint="Install npm or ensure PATH is available to OpenRalph"))
 
     venv_ok = _venv_has_pylsp(repo)
     path_ok = _have_bin("pylsp")
@@ -309,6 +389,14 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
     statuses.append(ToolStatus("playwright-python", pw_found,
                                "found" if pw_found else "missing"))
 
+    pw_cli_found = _have_bin("playwright-cli") or _have_bin_in("playwright-cli", local_bin)
+    pw_cli_hint = ""
+    if pw_cli_found and sandbox_mode == "docker":
+        pw_cli_hint = "playwright-cli requires browser binaries; set sandbox.mode = \"local\" for web projects"
+    statuses.append(ToolStatus("playwright-cli", pw_cli_found,
+                               "found" if pw_cli_found else "missing",
+                               hint=pw_cli_hint or ("npm install @playwright/cli" if not pw_cli_found else "")))
+
     if proxy_enabled:
         pid_file = repo / ".ralph" / "proxy.pid"
         pid_active, pid = _proxy_pid_active(pid_file)
@@ -318,8 +406,11 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
             statuses.append(ToolStatus("proxy", True, f"running (PID {pid}) on port {proxy_listen_port}"))
         elif port_listening:
             statuses.append(ToolStatus("proxy", True, f"port {proxy_listen_port} in use (external process)"))
+        elif pid_active and not port_listening:
+            statuses.append(ToolStatus("proxy", False, f"stale PID {pid}, port {proxy_listen_port} not listening",
+                                       hint="Run: openralph proxy stop . && openralph proxy start ."))
         else:
-            statuses.append(ToolStatus("proxy", False, "not running",
-                                       hint="Run: openralph proxy start ."))
+            statuses.append(ToolStatus("proxy", True, "enabled but not running",
+                                       hint="Run: openralph proxy start . (optional)"))
 
     return statuses

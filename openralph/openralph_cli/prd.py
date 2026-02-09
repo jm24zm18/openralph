@@ -3,10 +3,13 @@ import json
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .agent import run_agent, AgentConfig
 from .agent.providers import OpenAIProvider
-from .settings import OpenRalphSettings
+from .settings import OpenRalphSettings, get_provider_config
+from .json_extract import extract_json_object
+from .ui import console
 
 
 @dataclass
@@ -14,6 +17,22 @@ class PRDContext:
     repo_name: str
     files: dict[str, str]
     file_tree: list[str]
+
+
+class PRDGenerationError(RuntimeError):
+    pass
+
+
+class PRDProviderConnectionError(PRDGenerationError):
+    pass
+
+
+class PRDProviderRequestError(PRDGenerationError):
+    pass
+
+
+class PRDEmptyOutputError(PRDGenerationError):
+    pass
 
 
 PRD_TEMPLATE = """# Product Requirements Document — {repo_name}
@@ -164,21 +183,48 @@ def generate_prd(
     prompt = _build_prompt(ctx, extra_context=extra_context)
     settings = OpenRalphSettings.load(repo)
     provider = _get_provider(settings)
-    result = run_agent(
-        provider=provider,
-        prompt=prompt,
-        repo=repo,
-        config=AgentConfig(
-            max_turns=settings.agent_max_turns,
-            timeout_default=settings.agent_timeout,
-            max_output_chars=settings.agent_max_output,
-        ),
-    )
+    endpoint = _provider_endpoint(provider.base_url)
+    try:
+        result = run_agent(
+            provider=provider,
+            prompt=prompt,
+            repo=repo,
+            config=AgentConfig(
+                max_turns=settings.agent_max_turns,
+                timeout_default=settings.agent_timeout,
+                max_output_chars=settings.agent_max_output,
+            ),
+        )
+    except RuntimeError as e:
+        message = str(e)
+        if "LLM API connection error" in message:
+            raise PRDProviderConnectionError(
+                f"Provider unreachable at {endpoint} (model={provider.model}): {message}"
+            ) from e
+        if "LLM API error" in message or "invalid JSON" in message:
+            raise PRDProviderRequestError(
+                f"Provider request failed at {endpoint} (model={provider.model}): {message}"
+            ) from e
+        raise PRDGenerationError(f"PRD generation failed: {message}") from e
+
     output = (result.final_text or "").strip()
     if not output:
-        raise RuntimeError("PRD generation returned empty output")
+        raise PRDEmptyOutputError(
+            f"Provider returned empty output at {endpoint} (model={provider.model})."
+        )
     output_path.write_text(output, encoding="utf-8")
     return output_path
+
+
+def _provider_endpoint(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "unknown-host"
+    port = parsed.port
+    if port is not None:
+        return f"{host}:{port}"
+    if parsed.scheme == "https":
+        return f"{host}:443"
+    return f"{host}:80"
 
 def generate_prd_answers(repo: Path, user_prompt: str = "") -> dict[str, str]:
     """Generate PRD Q&A answers using the native agent."""
@@ -223,27 +269,20 @@ Questions:
 
 
 def _get_provider(settings: OpenRalphSettings) -> OpenAIProvider:
-    base_url = f"http://127.0.0.1:{settings.proxy_listen_port}"
+    provider_cfg = get_provider_config(settings, role="plan")
     return OpenAIProvider(
-        base_url=base_url,
-        api_key=settings.proxy_api_key,
-        model=settings.proxy_model_id,
-        timeout=settings.agent_timeout,
+        base_url=str(provider_cfg["base_url"]),
+        api_key=str(provider_cfg["api_key"]),
+        model=str(provider_cfg["model"]),
+        timeout=int(provider_cfg["timeout"]),
     )
 
 
 def _extract_json_from_response(text: str) -> dict[str, str] | None:
-    try:
-        return json.loads(text)
-    except Exception:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(text[start:end + 1])
-            except Exception:
-                return None
+    data = extract_json_object(text)
+    if not isinstance(data, dict):
         return None
+    return data
 
 
 PRD_QA_QUESTIONS = [
@@ -263,14 +302,15 @@ def run_prd_qa(repo: Path) -> dict[str, str]:
     """Run interactive Q&A to gather PRD info."""
     answers: dict[str, str] = {}
 
-    print("\n[bold]PRD Q&A Session[/bold]")
-    print("Answer the following questions to generate a PRD.\n")
+    console.print("\n[bold]PRD Q&A Session[/bold]")
+    console.print("[dim]Answer the following questions to generate a PRD.[/dim]\n")
 
-    for key, question in PRD_QA_QUESTIONS:
-        print(f"[cyan]{question}[/cyan]")
+    total = len(PRD_QA_QUESTIONS)
+    for idx, (key, question) in enumerate(PRD_QA_QUESTIONS, start=1):
+        console.print(f"[bold cyan][{idx}/{total}][/bold cyan] {question}")
         answer = input("> ").strip()
         answers[key] = answer
-        print()
+        console.print()
 
     return answers
 

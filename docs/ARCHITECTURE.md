@@ -8,3 +8,4 @@ Major modules:
 - `git_manager.py`: branch/checkpoint/rollback helpers
 - `memory/`: sqlite db, index, query, vacuum
 - `loop.py`: orchestration scaffold for native agents with memory context
+- `issues.py`: test/review issue extraction and bug index generation

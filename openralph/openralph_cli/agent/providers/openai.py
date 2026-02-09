@@ -8,6 +8,7 @@ import urllib.error
 from typing import Iterator
 
 from .base import LLMProvider, Message, ToolCall, ToolResult, StreamChunk
+from ...logging import raw_log
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ class OpenAIProvider(LLMProvider):
 
         body = json.dumps(payload).encode("utf-8")
         log.debug("Request to %s: %d bytes", url, len(body))
+        raw_log("provider", f"REQUEST url={url}\nheaders={{\"Authorization\": \"Bearer ***\"}}\npayload={json.dumps(payload, ensure_ascii=False)}")
         if log.isEnabledFor(logging.DEBUG):
             # Log messages summary: role, content length, tool calls
             for i, m in enumerate(payload.get("messages", [])):
@@ -166,19 +168,23 @@ class OpenAIProvider(LLMProvider):
                 data = json.loads(response_body)
                 log.debug("Response: %d bytes", len(response_body))
                 log.debug("Response body: %s", response_body[:4000])
+                raw_log("provider", f"RESPONSE status={getattr(resp, 'status', 'unknown')}\nbody={response_body}")
                 return self._parse_response(data)
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             log.error("HTTP %d: %s", e.code, error_body[:500])
+            raw_log("provider", f"HTTP_ERROR status={e.code}\nbody={error_body}")
             raise RuntimeError(f"LLM API error: HTTP {e.code}: {error_body[:200]}")
 
         except urllib.error.URLError as e:
             log.error("URL error: %s", e.reason)
+            raw_log("provider", f"URL_ERROR reason={e.reason}")
             raise RuntimeError(f"LLM API connection error: {e.reason}")
 
         except json.JSONDecodeError as e:
             log.error("JSON decode error: %s", e)
+            raw_log("provider", f"JSON_DECODE_ERROR error={e}")
             raise RuntimeError(f"LLM API returned invalid JSON: {e}")
 
     def stream(
@@ -207,26 +213,68 @@ def _parse_tool_arguments(raw_args: object) -> dict:
     if isinstance(raw_args, dict):
         return raw_args
     if not isinstance(raw_args, str):
-        return {"_raw": raw_args}
+        return {"_invalid_json": raw_args, "_invalid_reason": "arguments are not a JSON string"}
 
     try:
         return json.loads(raw_args)
     except json.JSONDecodeError:
-        pass
+        repaired = _repair_json_like(raw_args)
+        if repaired is not None:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+        reason = _detect_json_issue(raw_args)
+        return {"_invalid_json": raw_args, "_invalid_reason": reason}
 
-    try:
-        import ast
-        parsed = ast.literal_eval(raw_args)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
 
-    cleaned = raw_args.strip().strip("`")
-    if cleaned and cleaned != raw_args:
+def _detect_json_issue(raw_args: str) -> str:
+    text = raw_args.strip()
+    if not text:
+        return "empty arguments"
+
+    stack: list[str] = []
+    pairs = {"]": "[", "}": "{"}
+    for ch in text:
+        if ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if not stack or stack[-1] != pairs[ch]:
+                return "unmatched closing bracket"
+            stack.pop()
+    if stack:
+        return "unmatched opening bracket"
+
+    if ",}" in text or ",]" in text:
+        return "trailing comma detected"
+
+    return "invalid JSON (use double quotes and no trailing commas)"
+
+
+def _repair_json_like(raw_args: str) -> str | None:
+    text = raw_args.strip()
+    if not text:
+        return None
+
+    if ",}" in text or ",]" in text:
+        text = text.replace(",}", "}").replace(",]", "]")
+
+    if not text or text[0] not in "{[":
+        return None
+
+    # Trim trailing characters if they look like extra closers or commas.
+    trimmed = text
+    for _ in range(5000):
         try:
-            return json.loads(cleaned)
+            json.loads(trimmed)
+            return trimmed
         except json.JSONDecodeError:
-            pass
+            if not trimmed:
+                return None
+            last = trimmed[-1]
+            if last in "]},":
+                trimmed = trimmed[:-1].rstrip()
+                continue
+            break
 
-    return {"_raw": raw_args}
+    return None

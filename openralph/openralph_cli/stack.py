@@ -67,7 +67,7 @@ def read_stack_file(path: Path) -> str | None:
             data = json.loads(text)
             if isinstance(data, dict) and data.get("stack"):
                 return str(data["stack"]).strip()
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
     for line in text.splitlines():
         if ":" in line:
@@ -90,15 +90,27 @@ def write_stack_file(path: Path, choice: StackChoice) -> None:
 def default_test_command(stack: str, repo: Path) -> str | None:
     stack = stack.strip().lower()
     if stack == "node":
+        pkg_json = repo / "package.json"
+        if not pkg_json.exists():
+            return None
+        try:
+            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
+        test_script = scripts.get("test", "") if isinstance(scripts, dict) else ""
+        if not isinstance(test_script, str) or not test_script.strip():
+            return None
+        # npm init default placeholder always fails; skip it as a "default test command".
+        if "no test specified" in test_script.lower():
+            return None
         if (repo / "pnpm-lock.yaml").exists():
             return "pnpm test"
         if (repo / "yarn.lock").exists():
             return "yarn test"
-        if (repo / "package.json").exists():
-            return "npm test"
-        return None
+        return "npm test"
     if stack == "python":
-        return "python -m pytest -q"
+        return "python3 -m pytest -q"
     if stack == "rust":
         return "cargo test"
     if stack == "go":

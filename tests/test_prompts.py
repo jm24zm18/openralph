@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from openralph.openralph_cli.prompts import build_builder_prompt, build_review_prompt
+from openralph.openralph_cli.prompts import TEST_SYSTEM, build_builder_prompt, build_review_prompt
 
 
 def test_build_builder_prompt_auto_mode_disables_human_requests() -> None:
@@ -32,3 +32,8 @@ def test_build_review_prompt_auto_mode_uses_assumptions_section() -> None:
     assert "## Open assumptions (auto mode)" in prompt
     assert "do NOT write .ralph/HUMAN_REQUEST.md" in prompt
     assert "## Questions (if any)" not in prompt
+
+
+def test_test_system_mentions_browser_tools() -> None:
+    assert "browser_navigate" in TEST_SYSTEM
+    assert "browser_console" in TEST_SYSTEM

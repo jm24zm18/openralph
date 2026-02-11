@@ -145,6 +145,32 @@ def _have_python_module(module: str, repo: Path | None = None) -> bool:
     p = _run([system_py, "-c", f"import {module}"])
     return p.returncode == 0
 
+
+def _playwright_browser_runtime_ok(repo: Path) -> tuple[bool, str]:
+    tools_py = _get_tools_venv_python(repo)
+    py = tools_py or _find_system_python()
+    script = (
+        "from playwright.sync_api import sync_playwright\n"
+        "p = sync_playwright().start()\n"
+        "b = p.chromium.launch(headless=True)\n"
+        "b.close()\n"
+        "p.stop()\n"
+        "print('ok')\n"
+    )
+    try:
+        proc = subprocess.run(
+            [py, "-c", script],
+            text=True,
+            capture_output=True,
+            timeout=25,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"runtime check failed ({type(e).__name__}: {e})"
+    if proc.returncode == 0:
+        return True, "launch ok"
+    detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+    return False, detail
+
 def _ollama_ok(host: str) -> tuple[bool, str]:
     try:
         req = urllib.request.Request(f"{host}/api/tags", method="GET")
@@ -388,6 +414,14 @@ def doctor_report(*, repo: Path, ollama_host: str, embed_model: str, vacuum_warn
     pw_found = _have_python_module("playwright", repo)
     statuses.append(ToolStatus("playwright-python", pw_found,
                                "found" if pw_found else "missing"))
+    if pw_found:
+        pw_browser_ok, pw_browser_detail = _playwright_browser_runtime_ok(repo)
+        statuses.append(ToolStatus(
+            "playwright-browser-runtime",
+            pw_browser_ok,
+            pw_browser_detail,
+            hint="" if pw_browser_ok else "Run: python3 -m playwright install chromium",
+        ))
 
     pw_cli_found = _have_bin("playwright-cli") or _have_bin_in("playwright-cli", local_bin)
     pw_cli_hint = ""

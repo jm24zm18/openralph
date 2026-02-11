@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import openralph.openralph_cli.agent.tools as tools_module
 from openralph.openralph_cli.agent.tools import (
     ToolContext,
     _normalize_tool_args,
@@ -84,3 +85,37 @@ def test_execute_tool_aliases_print_tree_to_list_dir(tmp_repo: Path) -> None:
     result, is_error = execute_tool("print_tree", {"path": "."}, ctx)
     assert is_error is False
     assert result is not None
+
+
+def test_execute_tool_aliases_navigate_to_browser_navigate(tmp_repo: Path) -> None:
+    class StubSession:
+        def navigate(self, url: str, wait_until: str = "domcontentloaded") -> dict:
+            return {"url": url, "wait_until": wait_until}
+
+    original = tools_module.get_session
+    tools_module.get_session = lambda _cfg: StubSession()
+    try:
+        ctx = ToolContext(repo=tmp_repo)
+        result, is_error = execute_tool("navigate", {"url": "https://example.com"}, ctx)
+    finally:
+        tools_module.get_session = original
+
+    assert is_error is False
+    assert "https://example.com" in result
+
+
+def test_browser_console_tool_dispatch(tmp_repo: Path) -> None:
+    class StubSession:
+        def get_console(self, level=None, last_n=50, clear=False):  # noqa: ANN001
+            return [{"type": level or "log", "text": "ok", "last_n": last_n, "clear": clear}]
+
+    original = tools_module.get_session
+    tools_module.get_session = lambda _cfg: StubSession()
+    try:
+        ctx = ToolContext(repo=tmp_repo)
+        result, is_error = execute_tool("browser_console", {"level": "error", "last_n": 3}, ctx)
+    finally:
+        tools_module.get_session = original
+
+    assert is_error is False
+    assert "\"type\": \"error\"" in result

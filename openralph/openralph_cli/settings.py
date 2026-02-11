@@ -173,6 +173,10 @@ _TOOL_PERMISSION_ALIASES: dict[str, str] = {
     "write": "write_file",
     "search_repo": "repo_search",
     "ls": "list_dir",
+    "navigate": "browser_navigate",
+    "js_eval": "browser_evaluate",
+    "console": "browser_console",
+    "network": "browser_network",
 }
 
 _VALID_AGENT_TOOL_PERMISSIONS = {
@@ -185,6 +189,14 @@ _VALID_AGENT_TOOL_PERMISSIONS = {
     "list_dir",
     "search",
     "repo_search",
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "browser_screenshot",
+    "browser_snapshot",
+    "browser_evaluate",
+    "browser_console",
+    "browser_network",
 }
 
 
@@ -225,7 +237,7 @@ class OpenRalphSettings:
     # Loop
     loop_max_iters: int = 10
     loop_rollback_on_gate_fail: bool = False
-    loop_max_gate_fails: int = 3
+    loop_max_gate_fails: int = 5
     loop_prd_refresh_every: int = 0
     loop_prd_refresh_mode: str = ""  # "" | "ask"
     loop_prd_qa_mode: str = "handoff"  # interactive|handoff|auto|auto-then-handoff
@@ -233,7 +245,7 @@ class OpenRalphSettings:
     loop_review_report: str = ".ralph/REVIEW_REPORT.md"
     loop_final_report: str = ".ralph/FINAL.md"
     loop_auto_mode: str = ""  # "" (off) | "full" (PRD+plan+build all features)
-    loop_max_feature_iters: int = 5  # Max iterations per feature when auto_mode=full
+    loop_max_feature_iters: int = 8  # Max iterations per feature when auto_mode=full
     loop_retry_failed: bool = True  # Retry failed features on re-run
     loop_smoke_check: bool = True  # Run runtime smoke checks after gate PASS
     loop_smoke_timeout: int = 10  # Per-check subprocess timeout in seconds
@@ -269,6 +281,14 @@ class OpenRalphSettings:
     sandbox_fail_closed: bool = True
     sandbox_env_allowlist: list[str] = field(default_factory=lambda: ["OLLAMA_HOST", "EMBED_MODEL", "BRAVE_API_KEY"])
 
+    # Browser
+    browser_headless: bool = True
+    browser_viewport_width: int = 1280
+    browser_viewport_height: int = 720
+    browser_default_timeout: int = 10000
+    browser_console_buffer_max: int = 500
+    browser_network_buffer_max: int = 200
+
     # Proxy
     proxy_enabled: bool = False
     proxy_listen_port: int = 18889
@@ -290,7 +310,7 @@ class OpenRalphSettings:
 
     # Native agent settings
     agent_native: bool = True  # Must remain true; OpenCode support removed
-    agent_max_turns: int = 50  # Max tool call iterations per agent run
+    agent_max_turns: int = 80  # Max tool call iterations per agent run
     agent_timeout: int = 120  # Per-tool timeout in seconds
     agent_max_output: int = 50000  # Max chars per tool output
 
@@ -304,9 +324,17 @@ class OpenRalphSettings:
     agent_test_model: str = ""
     agent_review_model: str = ""
     # Per-agent permissions
-    agent_code_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "search"])
+    agent_code_permissions: list[str] = field(default_factory=lambda: [
+        "bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "search",
+        "browser_navigate", "browser_click", "browser_fill", "browser_screenshot", "browser_snapshot",
+        "browser_evaluate", "browser_console", "browser_network",
+    ])
     agent_plan_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"])
-    agent_test_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"])
+    agent_test_permissions: list[str] = field(default_factory=lambda: [
+        "bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search",
+        "browser_navigate", "browser_click", "browser_fill", "browser_screenshot", "browser_snapshot",
+        "browser_evaluate", "browser_console", "browser_network",
+    ])
     agent_review_permissions: list[str] = field(default_factory=lambda: ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"])
 
     @staticmethod
@@ -389,6 +417,14 @@ class OpenRalphSettings:
         s.sandbox_network = _to_str(sandbox.get("network", s.sandbox_network), key_path="sandbox.network", source=_source_for("sandbox", "network")) or s.sandbox_network
         s.sandbox_fail_closed = _to_bool(sandbox.get("fail_closed", s.sandbox_fail_closed), key_path="sandbox.fail_closed", source=_source_for("sandbox", "fail_closed"))
         s.sandbox_env_allowlist = _to_str_list(sandbox.get("env_allowlist", s.sandbox_env_allowlist), key_path="sandbox.env_allowlist", source=_source_for("sandbox", "env_allowlist"))
+
+        browser = _ensure_table(merged, "browser", source=_source_for("browser"))
+        s.browser_headless = _to_bool(browser.get("headless", s.browser_headless), key_path="browser.headless", source=_source_for("browser", "headless"))
+        s.browser_viewport_width = _to_int(browser.get("viewport_width", s.browser_viewport_width), key_path="browser.viewport_width", source=_source_for("browser", "viewport_width"))
+        s.browser_viewport_height = _to_int(browser.get("viewport_height", s.browser_viewport_height), key_path="browser.viewport_height", source=_source_for("browser", "viewport_height"))
+        s.browser_default_timeout = _to_int(browser.get("default_timeout", s.browser_default_timeout), key_path="browser.default_timeout", source=_source_for("browser", "default_timeout"))
+        s.browser_console_buffer_max = _to_int(browser.get("console_buffer_max", s.browser_console_buffer_max), key_path="browser.console_buffer_max", source=_source_for("browser", "console_buffer_max"))
+        s.browser_network_buffer_max = _to_int(browser.get("network_buffer_max", s.browser_network_buffer_max), key_path="browser.network_buffer_max", source=_source_for("browser", "network_buffer_max"))
 
         prx = _ensure_table(merged, "proxy", source=_source_for("proxy"))
         s.proxy_enabled = _to_bool(prx.get("enabled", s.proxy_enabled), key_path="proxy.enabled", source=_source_for("proxy", "enabled"))
@@ -483,6 +519,14 @@ class OpenRalphSettings:
                 "fail_closed": self.sandbox_fail_closed,
                 "env_allowlist": self.sandbox_env_allowlist,
             },
+            "browser": {
+                "headless": self.browser_headless,
+                "viewport_width": self.browser_viewport_width,
+                "viewport_height": self.browser_viewport_height,
+                "default_timeout": self.browser_default_timeout,
+                "console_buffer_max": self.browser_console_buffer_max,
+                "network_buffer_max": self.browser_network_buffer_max,
+            },
             "proxy": {
                 "enabled": self.proxy_enabled,
                 "listen_port": self.proxy_listen_port,
@@ -548,7 +592,7 @@ playwright_cli = true             # Install @playwright/cli for agent browser co
 [loop]
 max_iters = 10
 rollback_on_gate_fail = false
-max_gate_fails = 3
+max_gate_fails = 5
 prd_refresh_every = 0
 prd_refresh_mode = ""      # "" or "ask"
 prd_qa_mode = "handoff"    # interactive|handoff|auto|auto-then-handoff
@@ -556,7 +600,7 @@ test_report = ".ralph/TEST_REPORT.md"
 review_report = ".ralph/REVIEW_REPORT.md"
 final_report = ".ralph/FINAL.md"
 auto_mode = ""                         # "" (off) or "full" (PRD + plan + build all features)
-max_feature_iters = 5                  # Max iterations per feature when auto_mode = "full"
+max_feature_iters = 8                  # Max iterations per feature when auto_mode = "full"
 retry_failed = true                    # Retry failed features on re-run
 smoke_check = true                     # Run runtime smoke checks after gate PASS
 smoke_timeout = 10                     # Per-check subprocess timeout in seconds
@@ -588,6 +632,14 @@ network = "bridge"                      # bridge|none
 fail_closed = true                      # If docker is unavailable, fail instead of local fallback
 env_allowlist = ["OLLAMA_HOST", "EMBED_MODEL", "BRAVE_API_KEY"]  # Env vars passed into container
 
+[browser]
+headless = true                         # Browser tools run with headless Chromium
+viewport_width = 1280
+viewport_height = 720
+default_timeout = 10000                 # milliseconds
+console_buffer_max = 500
+network_buffer_max = 200
+
 [proxy]
 enabled = true                          # Enable LLM proxy server
 listen_port = 18889                     # Local port proxy listens on
@@ -606,7 +658,7 @@ cors_allow_origin = "*"                 # Access-Control-Allow-Origin when CORS 
 
 [agent]
 native = true                           # Use native agent (OpenCode removed)
-max_turns = 50                          # Max tool call iterations per agent run
+max_turns = 80                          # Max tool call iterations per agent run
 timeout = 120                           # Per-tool timeout in seconds
 max_output = 50000                      # Max chars per tool output
 
@@ -617,7 +669,7 @@ default_model = ""                      # Default model for all agents (empty = 
 
 [agents.code]
 model = ""                              # Model override for code agent (empty = use default)
-permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "search"]
+permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "search", "browser_navigate", "browser_click", "browser_fill", "browser_screenshot", "browser_snapshot", "browser_evaluate", "browser_console", "browser_network"]
 
 [agents.plan]
 model = ""                              # Model override for plan agent (empty = use default)
@@ -625,7 +677,7 @@ permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "
 
 [agents.test]
 model = ""                              # Model override for test agent (empty = use default)
-permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search"]
+permissions = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "repo_search", "browser_navigate", "browser_click", "browser_fill", "browser_screenshot", "browser_snapshot", "browser_evaluate", "browser_console", "browser_network"]
 
 [agents.review]
 model = ""                              # Model override for review agent (empty = use default)

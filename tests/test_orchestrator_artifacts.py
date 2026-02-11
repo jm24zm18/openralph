@@ -75,3 +75,45 @@ def test_success_downgraded_to_warning_when_tool_errors_exceed_threshold(monkeyp
     status_payload = json.loads((repo / ".ralph" / "RUN_STATUS.json").read_text(encoding="utf-8"))
     assert status_payload["status"] == "success_with_warnings"
     assert status_payload["tool_errors"] == 2
+
+
+def test_cleanup_errors_do_not_prevent_run_artifacts(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = OpenRalphSettings.load(repo)
+    settings.ui_dashboard = True
+    (repo / "docs").mkdir()
+    (repo / "docs" / "PRD.md").write_text("# PRD\n", encoding="utf-8")
+
+    class _FakeDashboard:
+        def __init__(self) -> None:
+            self.state = type("State", (), {"tool_errors": 0, "gate_history": []})()
+
+        def start(self) -> None:
+            return
+
+        def stop(self) -> None:
+            return
+
+    def _fake_run_feature_iterations(**kwargs):
+        paths = kwargs["paths"]
+        paths.done_marker.write_text("auto\n", encoding="utf-8")
+        paths.test_report.write_text("Gate: PASS\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr("openralph.openralph_cli.loop.orchestrator._ensure_proxy", lambda settings, log: None)
+    monkeypatch.setattr("openralph.openralph_cli.loop.orchestrator._preflight_backend", lambda settings: (True, "ok"))
+    monkeypatch.setattr("openralph.openralph_cli.loop.orchestrator._reindex", lambda *args, **kwargs: None)
+    monkeypatch.setattr("openralph.openralph_cli.loop.orchestrator._ensure_stack_choice", lambda *args, **kwargs: "python")
+    monkeypatch.setattr("openralph.openralph_cli.loop.orchestrator._run_feature_iterations", _fake_run_feature_iterations)
+    monkeypatch.setattr("openralph.openralph_cli.loop.orchestrator.Dashboard", _FakeDashboard)
+    monkeypatch.setattr(
+        "openralph.openralph_cli.loop.orchestrator.run_summary",
+        lambda state: (_ for _ in ()).throw(RuntimeError("summary boom")),
+    )
+
+    outcome = run_loop(repo, "test prompt", max_iters=1, settings=settings, mode="standard")
+    assert outcome.status == "success"
+
+    status_payload = json.loads((repo / ".ralph" / "RUN_STATUS.json").read_text(encoding="utf-8"))
+    assert status_payload["status"] == "success"

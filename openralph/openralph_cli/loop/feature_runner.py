@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ..agent.browser import close_session as close_browser_session
 from ..features import get_feature_context, set_current_feature
 from ..git_manager import (
     checkpoint_commit,
@@ -78,6 +79,10 @@ def _missing_goal_evidence(goal_contract: str, *evidence_texts: str) -> list[str
 
 
 def _kill_playwright_sessions(repo: Path, log) -> None:
+    try:
+        close_browser_session()
+    except Exception:
+        pass
     pw_cli = shutil.which("playwright-cli")
     if not pw_cli:
         local = repo / ".ralph" / "node-tools" / "node_modules" / ".bin" / "playwright-cli"
@@ -184,6 +189,7 @@ def _run_feature_iterations(
     feature_slug: str = "",
     iter_label_prefix: str = "",
     queue_item: FeatureQueueItem | None = None,
+    enforce_goal_contract: bool = True,
     dashboard: Dashboard | None = None,
 ) -> bool:
     test_report = _resolve_repo_path(repo, settings.loop_test_report, paths.test_report)
@@ -545,7 +551,7 @@ def _run_feature_iterations(
                 log.info("Smoke check passed")
                 if dashboard is not None:
                     dashboard.add_event("success", "smoke", "smoke check passed")
-        if gate and goal_contract:
+        if gate and goal_contract and enforce_goal_contract:
             final_text = _read_text(final_report, max_chars=8000) if final_report.exists() else ""
             missing_goal_evidence = _missing_goal_evidence(goal_contract, gate_report, review_text, final_text)
             if missing_goal_evidence:
@@ -700,6 +706,7 @@ def _run_feature_queue(
             feature_slug=item.slug,
             iter_label_prefix=f"[{item.slug}] ",
             queue_item=item,
+            enforce_goal_contract=(idx == total),
             dashboard=dashboard,
         )
 

@@ -28,7 +28,7 @@ from .policies import ensure_policies
 from .tooling import ensure_tools, doctor_report, _find_system_python
 from .memory import init_db, index_repo, query_memory, vacuum_db
 from .loop import run_loop
-from .loop.status import write_run_artifacts
+from .loop.status import RunOutcome, write_run_artifacts
 from .proxy import ProxyConfig, start_proxy_background, stop_proxy, proxy_status, proxy_is_listening
 from .prd import (
     PRDEmptyOutputError,
@@ -451,7 +451,15 @@ def run(repo: str = typer.Argument(".", help="Repo path"), prompt: str = typer.A
     log = get_logger("cli")
     iters = s.loop_max_iters if max_iters is None else max_iters
     log.info("Starting run loop with prompt: %s (max_iters=%d, auto=%s)", prompt[:100], iters, s.loop_auto_mode or "off")
-    outcome = run_loop(path, prompt, max_iters=iters, settings=s, mode=mode)
+    try:
+        outcome = run_loop(path, prompt, max_iters=iters, settings=s, mode=mode)
+    except Exception as e:
+        log.error("Run loop raised unexpectedly: %s", e, exc_info=True)
+        outcome = RunOutcome(
+            status="failed",
+            reason=f"run_loop_crashed: {e}",
+            stage="run",
+        )
     run_status = Paths.for_repo(path).run_status
     run_summary = Paths.for_repo(path).run_summary
     if (not run_status.exists()) or (not run_summary.exists()):

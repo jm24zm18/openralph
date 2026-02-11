@@ -94,6 +94,12 @@ def _run_native_agent(
         sandbox_network=settings.sandbox_network,
         sandbox_fail_closed=settings.sandbox_fail_closed,
         sandbox_env_allowlist=settings.sandbox_env_allowlist,
+        browser_headless=settings.browser_headless,
+        browser_viewport_width=settings.browser_viewport_width,
+        browser_viewport_height=settings.browser_viewport_height,
+        browser_default_timeout=settings.browser_default_timeout,
+        browser_console_buffer_max=settings.browser_console_buffer_max,
+        browser_network_buffer_max=settings.browser_network_buffer_max,
     )
 
     output_lines = []

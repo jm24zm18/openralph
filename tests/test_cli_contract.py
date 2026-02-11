@@ -30,3 +30,19 @@ def test_config_show_invalid_config_returns_friendly_error(tmp_path) -> None:
     assert result.exit_code == 2
     assert "Invalid config" in result.stdout
     assert "proxy.listen_port" in result.stdout
+
+
+def test_run_writes_failed_artifacts_if_run_loop_raises(monkeypatch, tmp_path) -> None:
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("openralph.openralph_cli.cli.run_loop", _boom)
+
+    result = runner.invoke(app, ["run", str(tmp_path), "test prompt"])
+    assert result.exit_code == 1
+
+    status_path = tmp_path / ".ralph" / "RUN_STATUS.json"
+    summary_path = tmp_path / ".ralph" / "RUN_SUMMARY.md"
+    assert status_path.exists()
+    assert summary_path.exists()
+    assert "run_loop_crashed: boom" in status_path.read_text(encoding="utf-8")

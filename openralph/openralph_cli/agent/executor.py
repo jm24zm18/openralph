@@ -34,6 +34,12 @@ class AgentConfig:
     sandbox_network: str = "bridge"
     sandbox_fail_closed: bool = True
     sandbox_env_allowlist: list[str] = field(default_factory=lambda: ["OLLAMA_HOST", "EMBED_MODEL", "BRAVE_API_KEY"])
+    browser_headless: bool = True
+    browser_viewport_width: int = 1280
+    browser_viewport_height: int = 720
+    browser_default_timeout: int = 10000
+    browser_console_buffer_max: int = 500
+    browser_network_buffer_max: int = 200
 
 
 @dataclass
@@ -84,6 +90,12 @@ def run_agent(
         sandbox_network=config.sandbox_network,
         sandbox_fail_closed=config.sandbox_fail_closed,
         sandbox_env_allowlist=config.sandbox_env_allowlist,
+        browser_headless=config.browser_headless,
+        browser_viewport_width=config.browser_viewport_width,
+        browser_viewport_height=config.browser_viewport_height,
+        browser_default_timeout=config.browser_default_timeout,
+        browser_console_buffer_max=config.browser_console_buffer_max,
+        browser_network_buffer_max=config.browser_network_buffer_max,
     )
 
     messages: list[Message] = [Message(role="user", content=prompt)]

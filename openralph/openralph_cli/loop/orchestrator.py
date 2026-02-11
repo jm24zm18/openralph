@@ -417,8 +417,22 @@ def run_loop(
             outcome.stage = "run"
         return outcome
     finally:
-        _kill_playwright_sessions(repo, log)
+        try:
+            _kill_playwright_sessions(repo, log)
+        except Exception:
+            log.warning("Cleanup failed while killing Playwright sessions", exc_info=True)
+
         if dashboard is not None:
-            dashboard.stop()
-            run_summary(dashboard.state)
-        _finalize_outcome()
+            try:
+                dashboard.stop()
+            except Exception:
+                log.warning("Cleanup failed while stopping dashboard", exc_info=True)
+            try:
+                run_summary(dashboard.state)
+            except Exception:
+                log.warning("Cleanup failed while rendering run summary", exc_info=True)
+
+        try:
+            _finalize_outcome()
+        except Exception:
+            log.error("Failed to write run outcome artifacts", exc_info=True)

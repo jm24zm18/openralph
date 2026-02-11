@@ -11,6 +11,8 @@ import shlex
 import urllib.error
 import os
 
+from .browser import BrowserSessionConfig, get_session, to_pretty_json
+
 log = logging.getLogger(__name__)
 
 
@@ -126,6 +128,100 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "browser_navigate",
+        "description": "Open a URL in a persistent headless browser session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Absolute URL to open"},
+                "wait_until": {"type": "string", "description": "One of: commit, domcontentloaded, load, networkidle"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_click",
+        "description": "Click an element by CSS/text selector.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "Playwright selector"},
+            },
+            "required": ["selector"],
+        },
+    },
+    {
+        "name": "browser_fill",
+        "description": "Fill an input/textarea by selector.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "Playwright selector"},
+                "value": {"type": "string", "description": "Value to fill"},
+            },
+            "required": ["selector", "value"],
+        },
+    },
+    {
+        "name": "browser_screenshot",
+        "description": "Capture screenshot and return accessibility snapshot text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "full_page": {"type": "boolean", "description": "Capture full page when true"},
+                "name": {"type": "string", "description": "Optional screenshot file stem"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "browser_snapshot",
+        "description": "Return Playwright accessibility snapshot of current page.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "browser_evaluate",
+        "description": "Evaluate JavaScript expression in current page context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "JavaScript expression passed to page.evaluate"},
+            },
+            "required": ["expression"],
+        },
+    },
+    {
+        "name": "browser_console",
+        "description": "Read captured console logs from the browser session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "description": "Optional level filter (log|info|warn|error|debug)"},
+                "last_n": {"type": "integer", "description": "How many latest events to return (default 50)"},
+                "clear": {"type": "boolean", "description": "Clear buffer after reading"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "browser_network",
+        "description": "Read captured network responses from the browser session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string", "description": "Optional method filter (GET, POST, ...)"},
+                "status_filter": {"type": "string", "description": "Optional status filter, e.g. 200 or 4xx"},
+                "last_n": {"type": "integer", "description": "How many latest events to return (default 50)"},
+                "clear": {"type": "boolean", "description": "Clear buffer after reading"},
+            },
+            "required": [],
+        },
+    },
 ]
 
 _TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -146,6 +242,12 @@ class ToolContext:
     sandbox_network: str = "bridge"  # bridge|none
     sandbox_fail_closed: bool = True
     sandbox_env_allowlist: list[str] = field(default_factory=lambda: ["OLLAMA_HOST", "EMBED_MODEL", "BRAVE_API_KEY"])
+    browser_headless: bool = True
+    browser_viewport_width: int = 1280
+    browser_viewport_height: int = 720
+    browser_default_timeout: int = 10000
+    browser_console_buffer_max: int = 500
+    browser_network_buffer_max: int = 200
     exclude_patterns: list[str] = field(default_factory=lambda: [
         ".git", "node_modules", ".venv", "venv", "__pycache__",
         "dist", "build", ".ralph", ".mypy_cache", ".pytest_cache",
@@ -212,6 +314,22 @@ def execute_tool(name: str, args: dict, ctx: ToolContext) -> tuple[str, bool]:
             result = _search_repo(query, args.get("path"), args.get("max_results"), ctx)
             is_error = result.startswith("Error:")
             return result, is_error
+        elif name == "browser_navigate":
+            return _browser_navigate(args, ctx)
+        elif name == "browser_click":
+            return _browser_click(args, ctx)
+        elif name == "browser_fill":
+            return _browser_fill(args, ctx)
+        elif name == "browser_screenshot":
+            return _browser_screenshot(args, ctx)
+        elif name == "browser_snapshot":
+            return _browser_snapshot(ctx)
+        elif name == "browser_evaluate":
+            return _browser_evaluate(args, ctx)
+        elif name == "browser_console":
+            return _browser_console(args, ctx)
+        elif name == "browser_network":
+            return _browser_network(args, ctx)
         else:
             return _unknown_tool_error(name), True
     except (ValueError, OSError, subprocess.SubprocessError) as e:
@@ -291,6 +409,42 @@ def _normalize_tool_args(name: str, args: dict | None) -> tuple[str, dict]:
             "path": ["base", "dir", "directory"],
             "max_results": ["limit", "max"],
         })
+    if lowered == "browser_navigate":
+        args = _normalize_args(args, {
+            "url": ["href", "uri"],
+            "wait_until": ["wait", "wait_for"],
+        })
+    if lowered == "browser_click":
+        args = _normalize_args(args, {
+            "selector": ["target", "text", "element", "locator"],
+        })
+    if lowered == "browser_fill":
+        args = _normalize_args(args, {
+            "selector": ["target", "element", "locator"],
+            "value": ["text", "content", "input"],
+        })
+    if lowered == "browser_screenshot":
+        args = _normalize_args(args, {
+            "name": ["filename"],
+            "full_page": ["full"],
+        })
+    if lowered == "browser_evaluate":
+        args = _normalize_args(args, {
+            "expression": ["script", "js", "code"],
+        })
+    if lowered == "browser_console":
+        args = _normalize_args(args, {
+            "level": ["type"],
+            "last_n": ["limit", "max_results"],
+            "clear": ["reset"],
+        })
+    if lowered == "browser_network":
+        args = _normalize_args(args, {
+            "method": ["http_method"],
+            "status_filter": ["status"],
+            "last_n": ["limit", "max_results"],
+            "clear": ["reset"],
+        })
 
     return name, args
 
@@ -330,6 +484,20 @@ def _resolve_tool_alias(name: str, args: dict) -> tuple[str, dict] | None:
         return "repo_search", args
     if lowered in {"print_tree", "ls_tree", "tree"}:
         return "list_dir", args
+    if lowered in {"navigate", "open_url", "goto", "visit"}:
+        return "browser_navigate", args
+    if lowered in {"click", "browser_tap"}:
+        return "browser_click", args
+    if lowered in {"fill", "type_into", "set_input"}:
+        return "browser_fill", args
+    if lowered in {"snapshot", "browser_dom", "dom_snapshot"}:
+        return "browser_snapshot", args
+    if lowered in {"js_eval", "evaluate_js", "eval_js"}:
+        return "browser_evaluate", args
+    if lowered in {"console", "browser_logs"}:
+        return "browser_console", args
+    if lowered in {"network", "browser_requests"}:
+        return "browser_network", args
     if lowered in _TOOL_NAMES:
         return lowered, args
     return None
@@ -413,6 +581,13 @@ def _recover_args_from_invalid_json(name: str, raw: object) -> dict | None:
         "search": ["query", "max_results"],
         "repo_search": ["query", "path", "max_results"],
         "search_repo": ["query", "path", "max_results"],
+        "browser_navigate": ["url", "wait_until"],
+        "browser_click": ["selector"],
+        "browser_fill": ["selector", "value"],
+        "browser_screenshot": ["full_page", "name"],
+        "browser_evaluate": ["expression"],
+        "browser_console": ["level", "last_n", "clear"],
+        "browser_network": ["method", "status_filter", "last_n", "clear"],
     }
     keys = targets.get(name, [])
     if not keys:
@@ -499,6 +674,8 @@ def _tool_alias_hints(name: str) -> str:
         "ls": "Hint: use 'list_dir' with optional {\"path\": \"...\"}.\n",
         "print_tree": "Hint: use 'list_dir' with optional {\"path\": \"...\"}.\n",
         "list_dircommentary": "Hint: use 'list_dir' with optional {\"path\": \"...\"}.\n",
+        "navigate": "Hint: use 'browser_navigate' with {\"url\": \"https://...\"}.\n",
+        "console": "Hint: use 'browser_console' with optional filters.\n",
     }
     return hints.get(lowered, "")
 
@@ -514,8 +691,118 @@ def _tool_examples(name: str) -> str:
         "list_dir": "Example: {\"path\": \".\"}",
         "search": "Example: {\"query\": \"pytest fixtures\", \"max_results\": 5}",
         "repo_search": "Example: {\"query\": \"GameOverScreen\", \"path\": \".\", \"max_results\": 20}",
+        "browser_navigate": "Example: {\"url\": \"http://localhost:3000\", \"wait_until\": \"domcontentloaded\"}",
+        "browser_click": "Example: {\"selector\": \"text=Start\"}",
+        "browser_fill": "Example: {\"selector\": \"input[name='email']\", \"value\": \"dev@example.com\"}",
+        "browser_screenshot": "Example: {\"full_page\": true, \"name\": \"home\"}",
+        "browser_snapshot": "Example: {}",
+        "browser_evaluate": "Example: {\"expression\": \"document.title\"}",
+        "browser_console": "Example: {\"level\": \"error\", \"last_n\": 20}",
+        "browser_network": "Example: {\"status_filter\": \"4xx\", \"last_n\": 30}",
     }
     return examples.get(name, "")
+
+
+def _browser_config(ctx: ToolContext) -> BrowserSessionConfig:
+    return BrowserSessionConfig(
+        headless=ctx.browser_headless,
+        viewport_width=ctx.browser_viewport_width,
+        viewport_height=ctx.browser_viewport_height,
+        default_timeout=ctx.browser_default_timeout,
+        console_buffer_max=ctx.browser_console_buffer_max,
+        network_buffer_max=ctx.browser_network_buffer_max,
+        screenshot_dir=(ctx.repo / ".ralph" / "screenshots"),
+    )
+
+
+def _browser_navigate(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        result = session.navigate(args["url"], wait_until=str(args.get("wait_until", "domcontentloaded")))
+        return to_pretty_json(result), False
+    except Exception as e:
+        return f"Error: browser_navigate failed: {e}", True
+
+
+def _browser_click(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        result = session.click(args["selector"])
+        return to_pretty_json(result), False
+    except Exception as e:
+        return f"Error: browser_click failed: {e}", True
+
+
+def _browser_fill(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        result = session.fill(args["selector"], str(args["value"]))
+        return to_pretty_json(result), False
+    except Exception as e:
+        return f"Error: browser_fill failed: {e}", True
+
+
+def _browser_screenshot(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        result = session.screenshot(
+            full_page=bool(args.get("full_page", False)),
+            name=str(args.get("name")) if args.get("name") is not None else None,
+        )
+        return to_pretty_json(result), False
+    except Exception as e:
+        return f"Error: browser_screenshot failed: {e}", True
+
+
+def _browser_snapshot(ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        return to_pretty_json(session.snapshot()), False
+    except Exception as e:
+        return f"Error: browser_snapshot failed: {e}", True
+
+
+def _browser_evaluate(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        result = session.evaluate(args["expression"])
+        return to_pretty_json({"result": result}), False
+    except Exception as e:
+        return f"Error: browser_evaluate failed: {e}", True
+
+
+def _browser_console(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        level = args.get("level")
+        last_n = int(args.get("last_n", 50))
+        clear = bool(args.get("clear", False))
+        rows = session.get_console(
+            level=str(level) if level not in (None, "") else None,
+            last_n=max(1, min(last_n, 500)),
+            clear=clear,
+        )
+        return to_pretty_json(rows), False
+    except Exception as e:
+        return f"Error: browser_console failed: {e}", True
+
+
+def _browser_network(args: dict, ctx: ToolContext) -> tuple[str, bool]:
+    try:
+        session = get_session(_browser_config(ctx))
+        method = args.get("method")
+        status_filter = args.get("status_filter")
+        last_n = int(args.get("last_n", 50))
+        clear = bool(args.get("clear", False))
+        rows = session.get_network(
+            method=str(method) if method not in (None, "") else None,
+            status_filter=str(status_filter) if status_filter not in (None, "") else None,
+            last_n=max(1, min(last_n, 500)),
+            clear=clear,
+        )
+        return to_pretty_json(rows), False
+    except Exception as e:
+        return f"Error: browser_network failed: {e}", True
 
 
 def _resolve_path(path_str: str, ctx: ToolContext) -> Path:

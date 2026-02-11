@@ -1,4 +1,4 @@
-# OpenRalph
+# OpenRalph [![Release](https://github.com/jm24zm18/openralph/actions/workflows/release.yml/badge.svg)](https://github.com/jm24zm18/openralph/actions/workflows/release.yml)
 
 OpenRalph is a self-contained CLI that orchestrates native agents for repo work, with:
 
